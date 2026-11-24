@@ -21,8 +21,8 @@ import {
   ExternalLink,
   UserCheck
 } from 'lucide-react';
-import { KitchenConfig, AvailabilityData, Booking, BookingCreateInput } from '../types';
-import { api, formatDisplayTime, formatDisplayDate } from '../services/api';
+import { KitchenConfig, AvailabilityData, Booking, BookingCreateInput, SlotCheckResult } from '../types';
+import { api, formatDisplayTime, formatDisplayDate, perthToday, addDaysToDate } from '../services/api';
 import { AvailabilityTimelineBar } from './AvailabilityTimelineBar';
 import { CountryCodePhoneInput } from './CountryCodePhoneInput';
 import { TermsAndConditionsModal } from './TermsAndConditionsModal';
@@ -53,8 +53,8 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
   const [activeServiceTab, setActiveServiceTab] = useState<'kitchen' | 'storage'>(initialServiceTab);
 
   // Today's date (past dates disabled)
-  const today = new Date();
-  const minDateStr = today.toISOString().split('T')[0];
+  // Perth's date, not the browser's or UTC's (UTC is still "yesterday" before 8am in Perth).
+  const minDateStr = perthToday();
 
   // 2-Stage Stepper: 1: Date & Time Slot, 2: Reservation & Contact Details
   const [currentStage, setCurrentStage] = useState<1 | 2>(1);
@@ -85,6 +85,7 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
   const [loadingAvailability, setLoadingAvailability] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [slotCheck, setSlotCheck] = useState<SlotCheckResult | null>(null);
 
   // Form submission state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -110,6 +111,30 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
     if (initialDuration) setDuration(initialDuration);
     if (initialServiceTab) setActiveServiceTab(initialServiceTab);
   }, [initialDate, initialTime, initialDuration, initialServiceTab]);
+
+  // Ask the server whether this exact date/time/duration is bookable.
+  useEffect(() => {
+    let active = true;
+    setSlotCheck(null);
+    const t = setTimeout(() => {
+      api
+        .checkSlot(date, startTime, duration)
+        .then((r) => active && setSlotCheck(r))
+        .catch((err: any) => {
+          if (active) {
+            setSlotCheck({
+              available: false,
+              reason: err.message || 'Could not verify this time slot.',
+              quote: undefined as any,
+            });
+          }
+        });
+    }, 200);
+    return () => {
+      active = false;
+      clearTimeout(t);
+    };
+  }, [date, startTime, duration]);
 
   // Load availability on date change
   useEffect(() => {
@@ -137,23 +162,16 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
   }, [date]);
 
   // Pricing calculations
-  const securityDeposit = config?.security_deposit || 750.0;
-  
-  // Tiered pricing: 2h=$100, 4h=$152 ($38/h base), 8h=$256 ($32/h), 12h=$360 ($30/h)
+  // Pricing comes from the server's config (the same table the server charges from).
+  const packages = config?.packages && config.packages.length ? config.packages : [];
   const getTierPrice = (hrs: number): number => {
-    if (hrs === 2) return 100.0;
-    if (hrs === 4) return 152.0;
-    if (hrs === 6) return 204.0;
-    if (hrs === 8) return 256.0;
-    if (hrs === 10) return 310.0;
-    if (hrs === 12) return 360.0;
-    if (hrs === 24) return 696.0;
-    return hrs * 38.0;
+    const pkg = packages.find((p) => p.hours === hrs);
+    return pkg ? pkg.price : hrs * (config?.hourly_rental_rate ?? 0);
   };
-
-  const baseRentalCost = getTierPrice(duration);
-  const gstAmount = baseRentalCost * 0.10;
-  const totalRentalCost = baseRentalCost + gstAmount;
+  const baseRentalCost = slotCheck?.quote?.base_price ?? getTierPrice(duration);
+  const gstAmount = slotCheck?.quote?.gst ?? Math.round(baseRentalCost * 10) / 100;
+  const totalRentalCost = slotCheck?.quote?.total_price ?? baseRentalCost + gstAmount;
+  const securityDeposit = slotCheck?.quote?.security_deposit ?? config?.security_deposit ?? 0;
 
   // Calculate requested time interval [startMin, endMin]
   const [startH, startM] = startTime.split(':').map(Number);
@@ -164,32 +182,13 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
   const endH = Math.floor(reqEndMin / 60) % 24;
   const endM = reqEndMin % 60;
   const endTimeFormatted = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+  const endsNextDay = reqEndMin > 24 * 60;
 
-  // Real-time conflict validation
-  const checkSlotConflict = () => {
-    if (!availability || !availability.slots) return { hasConflict: false, conflictReason: '' };
-    
-    for (const s of availability.slots) {
-      const [sh, sm] = (s.start_time || '00:00').split(':').map(Number);
-      const [eh, em] = (s.end_time || '24:00').split(':').map(Number);
-      let sMin = sh * 60 + sm;
-      let eMin = eh * 60 + em;
-      if (eMin <= sMin) eMin = 24 * 60;
-
-      // Overlap: reqStart < eMin && reqEnd > sMin
-      if (reqStartMin < eMin && reqEndMin > sMin) {
-        return {
-          hasConflict: true,
-          conflictReason: s.status === 'blocked' 
-            ? `Maintenance block from ${formatDisplayTime(s.start_time)} to ${formatDisplayTime(s.end_time)}`
-            : `Already reserved (${formatDisplayTime(s.start_time)} – ${formatDisplayTime(s.end_time)})`,
-        };
-      }
-    }
-    return { hasConflict: false, conflictReason: '' };
-  };
-
-  const slotConflict = checkSlotConflict();
+  // Conflict validation is done by the server: it knows about overnight shifts
+  // from the previous day, maintenance blocks and past times.
+  const slotConflict = slotCheck
+    ? { hasConflict: !slotCheck.available, conflictReason: slotCheck.reason || '' }
+    : { hasConflict: false, conflictReason: '' };
 
   // Guard for advancing to Stage 2: Requires Logged-In User
   const handleProceedToStage2 = () => {
@@ -424,32 +423,21 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                       <div className="flex flex-wrap gap-2 mt-2.5">
                         <button
                           type="button"
-                          onClick={() => {
-                            const d = new Date();
-                            setDate(d.toISOString().split('T')[0]);
-                          }}
+                          onClick={() => setDate(perthToday())}
                           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
                         >
                           Today
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            const d = new Date();
-                            d.setDate(d.getDate() + 1);
-                            setDate(d.toISOString().split('T')[0]);
-                          }}
+                          onClick={() => setDate(addDaysToDate(perthToday(), 1))}
                           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
                         >
                           Tomorrow
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            const d = new Date();
-                            d.setDate(d.getDate() + 2);
-                            setDate(d.toISOString().split('T')[0]);
-                          }}
+                          onClick={() => setDate(addDaysToDate(perthToday(), 2))}
                           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
                         >
                           In 2 Days
@@ -463,12 +451,12 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                         Rental Duration (Hours)
                       </label>
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                        {[
-                          { hours: 4, label: '4 Hours', price: '$152', badge: 'Min Shift' },
-                          { hours: 6, label: '6 Hours', price: '$204', badge: 'Popular' },
-                          { hours: 8, label: '8 Hours', price: '$256', badge: 'Best Value' },
-                          { hours: 12, label: '12 Hours', price: '$360', badge: 'Full Day' },
-                        ].map((tier) => (
+                        {packages.map((p, i) => ({
+                          hours: p.hours,
+                          label: `${p.hours} Hours`,
+                          price: `$${p.price % 1 === 0 ? p.price : p.price.toFixed(2)} + GST`,
+                          badge: ['Standard', 'Most Popular', 'Best Value', 'Full Day'][i] || 'Package',
+                        })).map((tier) => (
                           <button
                             key={tier.hours}
                             type="button"
@@ -517,7 +505,7 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                         <option value="22:00">10:00 PM AWST (Overnight Batching)</option>
                       </select>
                       <span className="text-[11px] text-brand-muted mt-1 block">
-                        Shift concludes at <strong>{formatDisplayTime(endTimeFormatted)} AWST</strong> ({duration}h total)
+                        Shift concludes at <strong>{formatDisplayTime(endTimeFormatted)} AWST{endsNextDay ? ' (next day)' : ''}</strong> ({duration}h total)
                       </span>
                     </div>
 
@@ -564,10 +552,10 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                   <div className="pt-4 border-t border-brand-mint-border flex justify-end">
                     <button
                       type="button"
-                      disabled={slotConflict.hasConflict || loadingAvailability}
+                      disabled={slotConflict.hasConflict || loadingAvailability || !slotCheck}
                       onClick={handleProceedToStage2}
                       className={`w-full sm:w-auto px-6 py-3.5 rounded-xl font-bold text-sm flex items-center justify-center space-x-2 transition-all shadow-md cursor-pointer ${
-                        slotConflict.hasConflict || loadingAvailability
+                        slotConflict.hasConflict || loadingAvailability || !slotCheck
                           ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                           : 'bg-brand-orange hover:bg-brand-orange-hover text-white hover:shadow-glow-orange transform hover:-translate-y-0.5'
                       }`}
@@ -793,7 +781,7 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                       </button>
                       <button
                         type="submit"
-                        disabled={isSubmitting || slotConflict.hasConflict || !termsAccepted}
+                        disabled={isSubmitting || !slotCheck || slotConflict.hasConflict || !termsAccepted}
                         className={`w-full sm:flex-1 py-4 px-6 rounded-xl font-black text-sm sm:text-base transition-all duration-200 flex items-center justify-center space-x-2.5 shadow-md cursor-pointer ${
                           slotConflict.hasConflict || !termsAccepted
                             ? 'bg-gray-300 text-gray-500 cursor-not-allowed'

@@ -1,4 +1,26 @@
+export interface KitchenPackage {
+  hours: number;
+  price: number; // AUD ex GST
+  label?: string;
+}
+
+export interface PaymentDetails {
+  account_name: string | null;
+  bank_name: string | null;
+  bsb: string | null;
+  account_number: string | null;
+  payid: string | null;
+}
+
 export interface KitchenConfig {
+  packages?: KitchenPackage[];
+  gst_rate?: number;
+  booking_hold_hours?: number;
+  storage_pricing?: { daily: number; weekly: number; monthly: number; long_term_daily: number; security_deposit: number };
+  storage_bay_count?: number;
+  terms_version?: string;
+  seller?: { legal_name: string; trading_name: string; abn: string | null };
+  payment_details?: PaymentDetails | null;
   hourly_rental_rate: number;
   min_rental_hours: number;
   operating_hours_start: string;
@@ -14,7 +36,18 @@ export interface KitchenConfig {
 }
 
 export interface Booking {
-  id: number;
+  id: number | string;
+  end_date?: string;
+  start_at?: string;
+  end_at?: string;
+  gst?: number;
+  amount_payable?: number;
+  package_label?: string;
+  access_code?: string;
+  hold_expires_at?: string;
+  paid_at?: string;
+  payment_method?: string;
+  user_id?: string;
   reference_code: string;
   full_name: string;
   business_name?: string;
@@ -36,10 +69,28 @@ export interface Booking {
   security_deposit?: number;
   total_price: number;
   total_cost?: number;
-  status: 'pending' | 'approved' | 'confirmed' | 'rejected' | 'cancelled' | 'completed' | 'pending_approval';
+  status: 'pending' | 'approved' | 'confirmed' | 'rejected' | 'cancelled' | 'completed' | 'expired' | 'pending_approval';
   payment_status: 'unpaid' | 'deposit_paid' | 'paid' | 'refunded';
   admin_notes?: string;
   created_at: string;
+}
+
+export interface SlotCheckResult {
+  available: boolean;
+  reason?: string;
+  end_date?: string;
+  end_time?: string;
+  conflicts?: { status: 'booked' | 'blocked'; start: { date: string; time: string }; end: { date: string; time: string } }[];
+  quote: {
+    hours: number;
+    label: string;
+    base_price: number;
+    cleaning_fee: number;
+    gst: number;
+    total_price: number;
+    security_deposit: number;
+    amount_payable: number;
+  };
 }
 
 export interface BookingCreateInput {
@@ -91,7 +142,7 @@ export interface DayAvailabilitySummary {
 }
 
 export interface BlockedSlot {
-  id: number;
+  id: number | string;
   block_date: string;
   start_time: string;
   end_time: string;
@@ -115,7 +166,7 @@ export interface EnquiryInput {
 }
 
 export interface Enquiry {
-  id: number;
+  id: number | string;
   reference_code?: string;
   name?: string;
   full_name?: string;
@@ -152,6 +203,8 @@ export interface DashboardStats {
 
 export interface User {
   id: number | string;
+  role?: 'hirer' | 'staff_admin' | 'super_admin';
+  terms_version?: string;
   email: string;
   full_name: string;
   business_name?: string;
@@ -192,9 +245,13 @@ export interface StorageBooking {
   duration_type: StorageDurationType;
   daily_rate: number;
   total_price: number;
+  gst?: number;
+  amount_payable?: number;
   security_deposit: number;
-  status: 'pending' | 'approved' | 'confirmed' | 'rejected' | 'cancelled' | 'completed';
-  payment_status: 'unpaid' | 'paid';
+  access_code?: string;
+  hold_expires_at?: string;
+  status: 'pending' | 'approved' | 'confirmed' | 'rejected' | 'cancelled' | 'completed' | 'expired';
+  payment_status: 'unpaid' | 'paid' | 'refunded';
   special_requirements?: string;
   created_at: string;
 }
@@ -206,6 +263,7 @@ export interface StorageAvailability {
   available_bays_count: number; // max_bays - occupied_bays_count
   available_bay_numbers: number[]; // e.g. [1, 2] or [2] or []
   overlapping_bookings: StorageBooking[];
+  quote?: { days: number; total_price: number; gst: number; daily_rate: number; security_deposit: number; amount_payable: number };
 }
 
 export type InvoiceStatus = 'pending' | 'paid' | 'overdue' | 'disputed' | 'refunded' | 'void';
@@ -213,6 +271,9 @@ export type InvoiceType = 'kitchen_rental' | 'storage_lease' | 'equipment_hire' 
 export type AIRiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
 export interface InvoiceLineItem {
+  gst?: number;
+  total_inc_gst?: number;
+  taxable?: boolean;
   description: string;
   quantity?: number;
   hours_or_quantity?: number;
@@ -222,6 +283,13 @@ export interface InvoiceLineItem {
 }
 
 export interface Invoice {
+  document_title?: string;
+  seller?: { legal_name?: string; trading_name?: string; abn?: string; address?: string; email?: string; phone?: string };
+  amount_payable?: number;
+  payment_reference?: string;
+  void_reason?: string;
+  risk_source?: string;
+  created_at?: string;
   id: string; // e.g. "INV-2026-001"
   invoice_number: string;
   booking_reference: string; // e.g. "DD-BK-77953" or "DD-ST-88102"

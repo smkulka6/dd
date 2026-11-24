@@ -1,127 +1,209 @@
+const env = require('../config/env');
 const Invoice = require('../models/Invoice');
-const { normalizeDate, addDays } = require('../utils/dateUtils');
+const Counter = require('../models/Counter');
+const { addGst, splitGstInclusive, toCents } = require('../utils/money');
+const { perthToday, addDays, formatPerth } = require('../utils/perthTime');
+const { isValidAbn, formatAbn } = require('../utils/abn');
+const { HttpError } = require('../utils/httpError');
 
-/**
- * Generate next permanent sequential ATO Tax Invoice number (e.g. INV-2026-0001)
- */
-const generateNextInvoiceNumber = async () => {
-  const year = new Date().getFullYear();
-  const prefix = `INV-${year}-`;
-  const latest = await Invoice.findOne({ invoice_number: new RegExp(`^${prefix}\\d+$`) })
-    .sort({ invoice_number: -1 })
-    .lean();
-
-  let nextSeq = 1;
-  if (latest && latest.invoice_number) {
-    const parts = latest.invoice_number.split('-');
-    const num = parseInt(parts[2], 10);
-    if (!isNaN(num)) nextSeq = num + 1;
+const requireSeller = () => {
+  if (!env.seller.abn) {
+    throw new HttpError(503, 'Invoicing is not configured: set SELLER_ABN on the server.');
   }
-
-  return `${prefix}${String(nextSeq).padStart(4, '0')}`;
+  return { ...env.seller };
 };
 
-/**
- * Create and persist an ATO-compliant Tax Invoice for a Kitchen Booking
- */
-const createInvoiceForBooking = async (booking, pricing) => {
-  const invoiceNumber = await generateNextInvoiceNumber();
-  const issueDate = normalizeDate(new Date()); // Actual issue date in Perth AWST
-  const dueDate = addDays(issueDate, 2); // 48-hour provisional hold window
+const nextInvoiceNumber = async (session) => {
+  const seq = await Counter.next('invoice', session);
+  return `INV-${perthToday().slice(0, 4)}-${String(seq).padStart(5, '0')}`;
+};
 
-  const lineItems = [
-    {
-      description: `Commercial Kitchen Shift Rental (${booking.duration_hours} hrs @ $${pricing.hourly_rate.toFixed(2)}/hr ex-GST)`,
-      quantity: booking.duration_hours,
-      unit_price: pricing.hourly_rate,
-      total: pricing.base_price,
-    },
+const buyerAbn = (abn) => (abn && isValidAbn(abn) ? formatAbn(abn) : '');
+
+/** Due date: N days after issue, but never after the service starts and never before today. */
+const dueDate = (serviceStartDate) => {
+  const today = perthToday();
+  let due = addDays(today, env.INVOICE_DUE_DAYS);
+  if (serviceStartDate && serviceStartDate < due) due = serviceStartDate;
+  return due < today ? today : due;
+};
+
+const exLine = (description, quantity, unitExCents) => {
+  const amountEx = Math.round(unitExCents * quantity);
+  const { gst, inc_gst } = addGst(amountEx);
+  return {
+    description,
+    quantity,
+    unit_price_cents: unitExCents,
+    amount_ex_gst_cents: amountEx,
+    gst_cents: gst,
+    amount_inc_gst_cents: inc_gst,
+    taxable: true,
+  };
+};
+
+const totals = (lines, depositCents) => {
+  const subtotal = lines.reduce((s, l) => s + l.amount_ex_gst_cents, 0);
+  const gst = lines.reduce((s, l) => s + l.gst_cents, 0);
+  const inc = lines.reduce((s, l) => s + l.amount_inc_gst_cents, 0);
+  return {
+    subtotal_ex_gst_cents: subtotal,
+    gst_cents: gst,
+    total_inc_gst_cents: inc,
+    security_deposit_cents: depositCents,
+    amount_payable_cents: inc + depositCents,
+  };
+};
+
+const issueForBooking = async (booking, { session, issuedBy } = {}) => {
+  if (booking.invoice) return Invoice.findById(booking.invoice).session(session || null);
+  const seller = requireSeller();
+  const lines = [
+    exLine(
+      `Commercial kitchen hire — ${booking.package_label || `${booking.duration_hours} hours`}, ` +
+        `${booking.booking_date} ${booking.start_time} to ${booking.end_date} ${booking.end_time} AWST`,
+      1,
+      booking.base_price_cents
+    ),
   ];
+  if (booking.cleaning_fee_cents > 0) lines.push(exLine('Cleaning fee', 1, booking.cleaning_fee_cents));
 
-  if (pricing.cleaning_fee > 0) {
-    lineItems.push({
-      description: 'End-of-Shift Commercial Sanitization Fee (ex-GST)',
-      quantity: 1,
-      unit_price: pricing.cleaning_fee,
-      total: pricing.cleaning_fee,
-    });
-  }
-
-  return Invoice.create({
-    invoice_number: invoiceNumber,
-    booking_reference: booking.reference_code,
-    booking_type: 'kitchen_rental',
-    customer_name: booking.full_name,
-    business_name: booking.business_name || '',
-    abn: booking.abn || '', // Never substitute Daily Drop's own ABN as customer ABN
-    email: booking.email,
-    phone: booking.phone || '',
-    issue_date: issueDate,
-    due_date: dueDate,
-    service_date_range: `${booking.booking_date}, ${booking.start_time} – ${booking.end_time} (${booking.duration_hours} hrs AWST)`,
-    line_items: lineItems,
-    rental_amount: pricing.base_price,
-    cleaning_fee: pricing.cleaning_fee,
-    security_deposit: pricing.security_deposit, // Listed separately as non-taxable escrow bond
-    subtotal: pricing.subtotal,
-    gst: pricing.gst, // Exact 10% of taxable subtotal (1/11th of total_amount)
-    total_amount: pricing.total_price,
-    status: 'pending',
-    ai_risk_level: 'low',
-    ai_risk_reason: 'Provisional 48-hour hold awaiting PayID/bank transfer verification.',
-    ai_recommended_action: 'Await bank transfer match or send PayID reminder.',
-  });
-};
-
-/**
- * Create and persist an ATO-compliant Tax Invoice for a Storage Lease
- */
-const createInvoiceForStorage = async (storageBooking) => {
-  const invoiceNumber = await generateNextInvoiceNumber();
-  const issueDate = normalizeDate(new Date());
-  const dueDate = addDays(issueDate, 2);
-
-  const totalInclusive = Number(storageBooking.total_price || 0);
-  // 1/11th of GST-inclusive supply
-  const gst = Number((totalInclusive / 11).toFixed(2));
-  const subtotal = Number((totalInclusive - gst).toFixed(2));
-  const bond = Number(storageBooking.security_deposit || 200);
-
-  return Invoice.create({
-    invoice_number: invoiceNumber,
-    booking_reference: storageBooking.reference_code,
-    booking_type: 'storage_lease',
-    customer_name: storageBooking.full_name,
-    business_name: storageBooking.business_name || '',
-    abn: storageBooking.abn || '',
-    email: storageBooking.email,
-    phone: storageBooking.phone || '',
-    issue_date: issueDate,
-    due_date: dueDate,
-    service_date_range: `${storageBooking.start_date} to ${storageBooking.end_date}`,
-    line_items: [
+  const [invoice] = await Invoice.create(
+    [
       {
-        description: `${storageBooking.bay_name} Commercial Storage Lease (ex-GST)`,
-        quantity: 1,
-        unit_price: subtotal,
-        total: subtotal,
+        invoice_number: await nextInvoiceNumber(session),
+        kind: 'kitchen_rental',
+        booking: booking._id,
+        booking_reference: booking.reference_code,
+        user: booking.user,
+        seller,
+        buyer: {
+          name: booking.full_name,
+          business_name: booking.business_name || '',
+          abn: buyerAbn(booking.abn),
+          email: booking.email,
+          phone: booking.phone,
+        },
+        issue_date: perthToday(),
+        due_date: dueDate(booking.booking_date),
+        supply_description: `${formatPerth(booking.start_at)} – ${formatPerth(booking.end_at)} (${booking.duration_hours} hrs)`,
+        line_items: lines,
+        ...totals(lines, booking.security_deposit_cents),
+        issued_by: issuedBy?._id,
       },
     ],
-    rental_amount: subtotal,
-    cleaning_fee: 0,
-    security_deposit: bond,
-    subtotal,
-    gst,
-    total_amount: totalInclusive,
-    status: 'pending',
-    ai_risk_level: 'low',
-    ai_risk_reason: 'Storage lease application awaiting initial payment.',
-    ai_recommended_action: 'Send PayID details and bay induction checklist.',
-  });
+    { session }
+  );
+  booking.invoice = invoice._id;
+  return invoice;
 };
 
-module.exports = {
-  generateNextInvoiceNumber,
-  createInvoiceForBooking,
-  createInvoiceForStorage,
+const issueForStorage = async (storage, { session, issuedBy } = {}) => {
+  if (storage.invoice) return Invoice.findById(storage.invoice).session(session || null);
+  const seller = requireSeller();
+  const split = splitGstInclusive(storage.total_cents);
+  const lines = [
+    {
+      description: `Storage bay ${storage.bay_number} (${storage.storage_type.replace('_', ' ')}), ` +
+        `${storage.start_date} to ${storage.end_date} (${storage.duration_days} days)`,
+      quantity: 1,
+      unit_price_cents: split.ex_gst,
+      amount_ex_gst_cents: split.ex_gst,
+      gst_cents: split.gst,
+      amount_inc_gst_cents: split.inc_gst,
+      taxable: true,
+    },
+  ];
+  const [invoice] = await Invoice.create(
+    [
+      {
+        invoice_number: await nextInvoiceNumber(session),
+        kind: 'storage_lease',
+        storage_booking: storage._id,
+        booking_reference: storage.reference_code,
+        user: storage.user,
+        seller,
+        buyer: {
+          name: storage.full_name,
+          business_name: storage.business_name || '',
+          abn: buyerAbn(storage.abn),
+          email: storage.email,
+          phone: storage.phone,
+        },
+        issue_date: perthToday(),
+        due_date: dueDate(storage.start_date),
+        supply_description: `${storage.start_date} to ${storage.end_date}`,
+        line_items: lines,
+        ...totals(lines, storage.security_deposit_cents),
+        issued_by: issuedBy?._id,
+      },
+    ],
+    { session }
+  );
+  storage.invoice = invoice._id;
+  return invoice;
 };
+
+/** Manual invoice. Line item unit prices are ex-GST; untaxed lines are allowed (e.g. reimbursements). */
+const issueCustom = async (input, { session, issuedBy } = {}) => {
+  const seller = requireSeller();
+  const lines = input.line_items.map((li) => {
+    const line = exLine(li.description, li.quantity, toCents(li.unit_price));
+    if (li.taxable === false) {
+      line.gst_cents = 0;
+      line.amount_inc_gst_cents = line.amount_ex_gst_cents;
+      line.taxable = false;
+    }
+    return line;
+  });
+  const [invoice] = await Invoice.create(
+    [
+      {
+        invoice_number: await nextInvoiceNumber(session),
+        kind: 'custom',
+        booking_reference: input.booking_reference || '',
+        seller,
+        buyer: {
+          name: input.customer_name,
+          business_name: input.business_name || '',
+          abn: buyerAbn(input.abn),
+          email: input.email || '',
+          phone: input.phone || '',
+        },
+        issue_date: perthToday(),
+        due_date: input.due_date || dueDate(),
+        supply_description: input.service_date_range || '',
+        line_items: lines,
+        ...totals(lines, toCents(input.security_deposit || 0)),
+        notes: input.notes || '',
+        issued_by: issuedBy?._id,
+      },
+    ],
+    { session }
+  );
+  return invoice;
+};
+
+/**
+ * Rule-based payment risk. (The old code labelled hard-coded demo values as
+ * "AI"; these are plain, explainable rules.)
+ */
+const assessRisk = (invoice, serviceStartAt, now = new Date()) => {
+  const status = invoice.effectiveStatus();
+  if (status === 'paid') return { level: 'low', reason: 'Paid.', action: 'No action needed.' };
+  if (status === 'void') return { level: 'low', reason: `Void: ${invoice.void_reason || 'cancelled'}.`, action: 'No action needed.' };
+  const hoursToStart = serviceStartAt ? (new Date(serviceStartAt).getTime() - now.getTime()) / 3600000 : null;
+  if (hoursToStart !== null && hoursToStart <= 24) {
+    return {
+      level: 'critical',
+      reason: 'Service starts within 24 hours and payment has not been recorded.',
+      action: 'Contact the customer now, or cancel to release the slot.',
+    };
+  }
+  if (status === 'overdue') {
+    return { level: 'high', reason: `Payment was due ${invoice.due_date}.`, action: 'Send a payment reminder.' };
+  }
+  return { level: 'medium', reason: `Awaiting payment (due ${invoice.due_date}).`, action: 'Monitor; send payment details if needed.' };
+};
+
+module.exports = { issueForBooking, issueForStorage, issueCustom, assessRisk };

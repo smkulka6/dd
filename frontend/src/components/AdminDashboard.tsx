@@ -57,15 +57,13 @@ import {
 } from '../types';
 import { 
   api, 
-  getGoogleSheetUrl, 
-  setGoogleSheetUrl,
   formatDisplayDate,
   formatDisplayTime,
   calculateEndTime,
   normalizeDate,
   normalizeTime,
-  DEFAULT_MOCK_BOOKINGS,
-  DEFAULT_MOCK_ENQUIRIES
+  perthToday,
+  addDaysToDate
 } from '../services/api';
 
 interface AdminDashboardProps {
@@ -81,8 +79,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onGoToCustomerPortal,
   onGoToSuperAdmin 
 }) => {
-  // Auth state (must authenticate with real JWT token)
-  const [token, setToken] = useState<string | null>(localStorage.getItem('dd_admin_token'));
+  // Auth state
+  // No default token: the panel shows the login form until a real staff login succeeds.
+  const [token, setToken] = useState<string | null>(api.getAdminToken());
+  useEffect(() => {
+    const onExpired = (e: Event) => {
+      const scope = (e as CustomEvent).detail?.scope;
+      if (scope === 'admin') setToken(null);
+    };
+    window.addEventListener('dd:auth-expired', onExpired);
+    return () => window.removeEventListener('dd:auth-expired', onExpired);
+  }, []);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -110,14 +117,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Schedule view mode in Dashboard
   const [scheduleView, setScheduleView] = useState<'day' | 'week'>('day');
 
-  // Google Sheets state
-  const [sheetUrlInput, setSheetUrlInput] = useState(getGoogleSheetUrl());
-  const [testingSheet, setTestingSheet] = useState(false);
-  const [sheetStatusMessage, setSheetStatusMessage] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Data states
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [bookings, setBookings] = useState<Booking[]>(DEFAULT_MOCK_BOOKINGS);
+  const [bookings, setBookings] = useState<Booking[]>([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [loadingBookings, setLoadingBookings] = useState(false);
@@ -234,7 +238,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [creatingBlock, setCreatingBlock] = useState(false);
 
   // Enquiries
-  const [enquiries, setEnquiries] = useState<Enquiry[]>(DEFAULT_MOCK_ENQUIRIES);
+  const [enquiries, setEnquiries] = useState<Enquiry[]>([]);
 
   // Selected Booking for Modal / Quick Action
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
@@ -276,28 +280,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalBookings: number;
     }>();
 
-    const defaultAbnMap: Record<string, string> = {
-      'michael': '54 123 456 789',
-      'rohit': '61 824 753 556',
-      'srini': '38 412 879 104',
-      'satya': '72 901 345 612',
-      'test': '47 917 570 500',
-    };
-
     bookings.forEach((b) => {
       const key = (b.email || b.phone || b.full_name).trim().toLowerCase();
       if (!key) return;
 
       const isActive = b.status === 'confirmed' || b.status === 'approved' || b.status === 'pending_approval';
       const existing = map.get(key);
-      const firstNameLower = b.full_name.split(' ')[0].toLowerCase();
-      const abnVal = (b as any).abn || defaultAbnMap[firstNameLower] || '51 902 829 220';
+      const abnVal = b.abn || '';
 
       if (existing) {
         existing.totalBookings += 1;
         if (isActive) existing.status = 'Active';
         if (!existing.business_name && b.business_name) existing.business_name = b.business_name;
-        if (abnVal && existing.abn === '51 902 829 220') existing.abn = abnVal;
+        if (abnVal && !existing.abn) existing.abn = abnVal;
       } else {
         map.set(key, {
           id: key,
@@ -316,18 +311,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [bookings]);
 
   // Kitchen Calendar: Weekly calendar view state & helpers (Image 4 wireframe)
-  const [calendarWeekStart, setCalendarWeekStart] = useState<Date>(() => {
-    return new Date('2026-10-26T00:00:00');
-  });
+  // Monday of the current week in Perth (was hard-coded to 26 Oct 2026).
+  const currentPerthMonday = () => {
+    const today = perthToday();
+    const dow = new Date(`${today}T00:00:00Z`).getUTCDay(); // 0 = Sunday
+    return addDaysToDate(today, dow === 0 ? -6 : 1 - dow);
+  };
+  const [calendarWeekStart, setCalendarWeekStart] = useState<string>(currentPerthMonday);
   const [calendarKitchen, setCalendarKitchen] = useState<string>('kitchen-1');
 
   const calendarDays = useMemo(() => {
     return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(calendarWeekStart);
-      d.setDate(calendarWeekStart.getDate() + i);
-      const iso = d.toISOString().split('T')[0];
-      const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
-      const dayNum = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
+      const iso = addDaysToDate(calendarWeekStart, i);
+      const d = new Date(`${iso}T12:00:00Z`);
+      const dayName = d.toLocaleDateString('en-AU', { weekday: 'short', timeZone: 'UTC' });
+      const dayNum = d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
       return {
         dateObj: d,
         iso,
@@ -342,19 +340,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (calendarDays.length === 0) return '';
     const first = calendarDays[0];
     const last = calendarDays[6];
-    return `Week of ${first.dayNum} – ${last.dayNum} ${first.dateObj.getFullYear()}`;
+    return `Week of ${first.dayNum} – ${last.dayNum} ${first.dateObj.getUTCFullYear()}`;
   }, [calendarDays]);
 
   const navigateCalendarWeek = (direction: -1 | 1) => {
-    setCalendarWeekStart((prev) => {
-      const next = new Date(prev);
-      next.setDate(next.getDate() + direction * 7);
-      return next;
-    });
+    setCalendarWeekStart((prev) => addDaysToDate(prev, direction * 7));
   };
 
   const resetCalendarToToday = () => {
-    setCalendarWeekStart(new Date('2026-10-26T00:00:00'));
+    setCalendarWeekStart(currentPerthMonday());
   };
 
   const CALENDAR_SLOTS = [
@@ -367,30 +361,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   ];
 
   const getSlotBookings = (dayIso: string, startHour: number, endHour: number) => {
+    const blockStart = Date.parse(`${dayIso}T${String(startHour).padStart(2, '0')}:00:00+08:00`);
+    const blockEnd = blockStart + (endHour - startHour) * 3600000;
     return bookings.filter((b) => {
-      let bDate = b.booking_date || '';
-      if (bDate.includes(',')) {
-        const parsed = new Date(bDate);
-        if (!isNaN(parsed.getTime())) {
-          bDate = parsed.toISOString().split('T')[0];
-        }
-      }
-      if (bDate !== dayIso) return false;
-
-      let h = 10;
-      const t = b.start_time || '';
-      const m12 = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
-      if (m12) {
-        h = parseInt(m12[1], 10);
-        const isPM = m12[3].toUpperCase() === 'PM';
-        if (isPM && h < 12) h += 12;
-        if (!isPM && h === 12) h = 0;
-      } else {
-        const m24 = t.match(/^(\d+):/);
-        if (m24) h = parseInt(m24[1], 10);
-      }
-
-      return h >= startHour && h < endHour;
+      if (!['pending', 'approved', 'confirmed', 'completed'].includes(b.status)) return false;
+      const bStart = b.start_at ? Date.parse(b.start_at) : Date.parse(`${b.booking_date}T${b.start_time}:00+08:00`);
+      const bEnd = b.end_at ? Date.parse(b.end_at) : bStart + (b.duration_hours || 0) * 3600000;
+      return bStart < blockEnd && bEnd > blockStart;
     });
   };
 
@@ -403,15 +380,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const loadAllData = async (jwtToken: string) => {
     try {
+      setLoadError(null);
       const [s, b, c, blk, enq] = await Promise.all([
-        api.getDashboardStats(jwtToken).catch(() => null),
-        api.getAdminBookings(jwtToken).catch(() => DEFAULT_MOCK_BOOKINGS),
-        api.getConfig().catch(() => null),
-        api.getBlockedSlots(jwtToken).catch(() => []),
-        api.getAdminEnquiries(jwtToken).catch(() => DEFAULT_MOCK_ENQUIRIES),
+        api.getDashboardStats(jwtToken),
+        api.getAdminBookings(jwtToken),
+        api.getConfig(),
+        api.getBlockedSlots(jwtToken),
+        api.getAdminEnquiries(jwtToken),
       ]);
-      if (s) setStats(s);
-      if (b && b.length > 0) setBookings(b);
+      setStats(s);
+      setBookings(b);
       if (c) {
         setConfig(c);
         setHourlyRateInput(String(c.hourly_rental_rate));
@@ -421,12 +399,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setCleaningFeeInput(String(c.cleaning_fee));
         setDepositInput(String(c.security_deposit));
       }
-      if (blk) setBlockedSlots(blk);
-      if (enq && enq.length > 0) setEnquiries(enq);
-      const st = await api.getStorageBookings().catch(() => []);
-      if (st && st.length > 0) setStorageBookings(st);
+      setBlockedSlots(blk);
+      setEnquiries(enq);
+      setStorageBookings(await api.getStorageBookings());
     } catch (err: any) {
-      console.warn('Dashboard loading error:', err);
+      setLoadError(err.message || 'Could not load dashboard data from the server.');
     }
   };
 
@@ -435,8 +412,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setLoginError(null);
     setLoggingIn(true);
     try {
-      const res = await api.adminLogin(username.trim(), password.trim());
-      localStorage.setItem('dd_admin_token', res.access_token);
+      const res = await api.adminLogin(username.trim(), password);
+      setPassword('');
       setToken(res.access_token);
     } catch (err: any) {
       setLoginError(err.message || 'Invalid username or password');
@@ -446,7 +423,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('dd_admin_token');
+    api.adminLogout();
     setToken(null);
   };
 
@@ -470,7 +447,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Update Booking Status
   const handleUpdateStatus = async (
-    bookingId: number,
+    bookingId: number | string,
     newStatus: string,
     newPayment?: string,
     overrideNotes?: string,
@@ -482,9 +459,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setBookingError(null);
     try {
       const refCode = selectedBooking?.reference_code;
+      // Only send what changes; the server applies payment first, then the status transition.
       const updated = await api.updateBookingStatus(token, bookingId, {
-        status: newStatus,
-        payment_status: newPayment || selectedBooking?.payment_status || 'unpaid',
+        status: newStatus && newStatus !== selectedBooking?.status ? newStatus : undefined,
+        payment_status: newPayment && newPayment !== selectedBooking?.payment_status ? newPayment : undefined,
         admin_notes: (overrideNotes !== undefined ? overrideNotes : actionNotes.trim()) || undefined,
         reference_code: refCode,
       });
@@ -530,9 +508,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setNotesSaved(false);
     try {
       const refCode = selectedBooking.reference_code;
-      const updated = await api.updateBookingStatus(token, selectedBooking.id, {
-        status: selectedBooking.status,
-        payment_status: selectedBooking.payment_status,
+      await api.updateBookingStatus(token, selectedBooking.id, {
         admin_notes: actionNotes.trim(),
         reference_code: refCode,
       });
@@ -554,19 +530,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleDeleteBooking = async (id: number, refCode?: string) => {
+  const handleDeleteBooking = async (id: number | string, refCode?: string) => {
     if (!token) return;
     const identifier = refCode || `ID ${id}`;
-    if (!window.confirm(`Are you sure you want to permanently delete reservation ${identifier}? This will free up the kitchen slot in real time.`)) {
+    if (!window.confirm(`Cancel reservation ${identifier}? This frees the kitchen slot. Invoiced bookings are kept for tax records.`)) {
       return;
     }
     setActionLoading('delete');
     setUpdatingBooking(true);
     try {
-      await api.deleteBooking(token, id, refCode);
-      setBookings((prev) => prev.filter((b) => b.id !== id && (!refCode || b.reference_code !== refCode)));
+      const res: any = await api.deleteBooking(token, id, refCode);
+      if (res?.cancelled && res.booking) {
+        setBookings((prev) => prev.map((b) => (b.id === id || (refCode && b.reference_code === refCode) ? { ...b, ...res.booking } : b)));
+      } else {
+        setBookings((prev) => prev.filter((b) => b.id !== id && (!refCode || b.reference_code !== refCode)));
+      }
       setSelectedBooking(null);
-      showToast(`Booking ${identifier} deleted successfully. Kitchen schedule updated.`, 'success');
+      showToast(`Booking ${identifier} ${res?.cancelled ? 'cancelled' : 'removed'}. Kitchen schedule updated.`, 'success');
       try {
         const s = await api.getDashboardStats(token);
         setStats(s);
@@ -604,51 +584,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleSaveGoogleSheetUrl = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanUrl = sheetUrlInput.trim();
-    setGoogleSheetUrl(cleanUrl);
-    setSheetStatusMessage('Google Sheet Webhook URL saved successfully!');
-    setTimeout(() => setSheetStatusMessage(null), 4000);
-  };
-
-  const handleTestGoogleSheetUrl = async () => {
-    const cleanUrl = sheetUrlInput.trim();
-    if (!cleanUrl) {
-      setSheetStatusMessage('Please enter a Google Apps Script Web App URL first.');
-      return;
-    }
-    setTestingSheet(true);
-    setSheetStatusMessage(null);
-    try {
-      setGoogleSheetUrl(cleanUrl);
-      const testRef = 'TEST-' + Math.floor(1000 + Math.random() * 9000);
-      await fetch(cleanUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'submit_enquiry',
-          reference_code: testRef,
-          full_name: 'Daily Drop Admin Test Ping',
-          business_name: 'Daily Drop Kitchen Verification',
-          email: 'admin@dailydropkitchen.com.au',
-          phone: "'0400 000 000",
-          preferred_contact: 'Email',
-          rental_type: 'Hourly Kitchen Rental',
-          registered_in_vic_park: 'Yes',
-          message: 'Real-time webhook sync test from Operations Dashboard.'
-        })
-      });
-      setSheetStatusMessage(`Connection verified! Test row (${testRef}) dispatched.`);
-      if (token) loadAllData(token);
-    } catch (err: any) {
-      setSheetStatusMessage('Error connecting to Google Sheet: ' + (err.message || 'Check permissions.'));
-    } finally {
-      setTestingSheet(false);
-    }
-  };
-
   const handleCreateBlock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token || !newBlockDate) return;
@@ -669,7 +604,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleDeleteBlock = async (id: number) => {
+  const handleDeleteBlock = async (id: number | string) => {
     if (!token) return;
     try {
       await api.deleteBlockedSlot(token, id);
@@ -701,12 +636,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">Username</label>
+              <label className="block text-xs font-bold text-gray-700 mb-1">Staff email</label>
               <input
-                type="text"
+                type="email"
+                autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="admin"
+                placeholder="you@dailydrop.today"
                 className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-xs focus:ring-2 focus:ring-[#112F21] focus:outline-none"
                 required
               />
@@ -715,6 +651,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <label className="block text-xs font-bold text-gray-700 mb-1">Password</label>
               <input
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
@@ -755,8 +692,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     .filter((b) => b.payment_status === 'unpaid')
     .reduce((acc, b) => acc + (b.total_price || b.total_cost || 0), 0);
   const totalDepositsHeld = bookings
-    .filter((b) => b.status === 'confirmed' || b.status === 'approved')
-    .length * 200; // Average bond
+    .filter((b) => b.payment_status === 'paid' && (b.status === 'confirmed' || b.status === 'completed'))
+    .reduce((acc, b) => acc + (b.security_deposit || 0), 0);
 
   // Booking status counts for donut chart
   const confirmedCount = bookings.filter((b) => b.status === 'confirmed').length;
@@ -1095,6 +1032,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
         </header>
+
+        {loadError && (
+          <div className="mx-4 sm:mx-6 lg:mx-8 mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-center justify-between gap-3">
+            <span>{loadError}</span>
+            <button type="button" onClick={() => token && loadAllData(token)} className="font-bold underline cursor-pointer">
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* ========================================================
             VIEW: OPERATIONS DASHBOARD (Matching Image 1)
@@ -2524,14 +2470,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <td className="px-4 py-3 text-right whitespace-nowrap">
                             <button
                               type="button"
+                              disabled={!['pending', 'approved', 'confirmed'].includes(st.status)}
                               onClick={async () => {
-                                await api.updateStorageBookingStatus(st.reference_code, st.status === 'confirmed' ? 'completed' : 'confirmed');
-                                const refreshed = await api.getStorageBookings();
-                                setStorageBookings(refreshed);
+                                try {
+                                  if (st.status === 'confirmed') {
+                                    await api.updateStorageBookingStatus(st.reference_code, { status: 'completed' });
+                                  } else {
+                                    const ref = window.prompt(`Record payment for ${st.reference_code}? Enter the bank/PayID reference:`);
+                                    if (ref === null) return;
+                                    await api.updateStorageBookingStatus(st.reference_code, { payment_status: 'paid', payment_reference: ref });
+                                  }
+                                  setStorageBookings(await api.getStorageBookings());
+                                } catch (err: any) {
+                                  showToast(err.message || 'Could not update storage booking', 'error');
+                                }
                               }}
                               className="text-xs px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-emerald-50 hover:text-emerald-700 font-bold transition-colors cursor-pointer"
                             >
-                              {st.status === 'confirmed' ? 'Mark Completed' : 'Approve Lease'}
+                              {st.status === 'confirmed' ? 'Mark Completed' : ['pending', 'approved'].includes(st.status) ? 'Record Payment' : st.status}
                             </button>
                           </td>
                         </tr>
@@ -2612,45 +2568,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div>
                   <h3 className="font-bold text-sm text-gray-900">Google Sheets Live Sync Integration</h3>
-                  <p className="text-xs text-gray-500">Real-time webhook sync for incoming bookings and enquiries</p>
+                  <p className="text-xs text-gray-500">Server-side reporting sync for bookings and enquiries</p>
                 </div>
               </div>
 
-              {sheetStatusMessage && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-semibold">
-                  {sheetStatusMessage}
-                </div>
-              )}
-
-              <form onSubmit={handleSaveGoogleSheetUrl} className="space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 mb-1">Google Apps Script Web App URL</label>
-                  <input
-                    type="url"
-                    value={sheetUrlInput}
-                    onChange={(e) => setSheetUrlInput(e.target.value)}
-                    placeholder="https://script.google.com/macros/s/.../exec"
-                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-xs focus:ring-2 focus:ring-[#112F21] focus:outline-none"
-                  />
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    type="submit"
-                    className="bg-[#112F21] hover:bg-[#1a4731] text-white px-5 py-2.5 rounded-xl font-bold text-xs"
-                  >
-                    Save URL
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleTestGoogleSheetUrl}
-                    disabled={testingSheet}
-                    className="border border-gray-200 hover:bg-gray-50 text-gray-800 px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2"
-                  >
-                    {testingSheet ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                    <span>Test Sync</span>
-                  </button>
-                </div>
-              </form>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                The Google Sheet is now a read-only report fed by the server. Bookings, enquiries and status changes are
+                queued in the database and delivered to the sheet in the background, with retries. The webhook URL and
+                its shared secret are set on the server (<code className="font-mono">GOOGLE_SHEET_WEBHOOK_URL</code>,{' '}
+                <code className="font-mono">GOOGLE_SHEET_WEBHOOK_SECRET</code>) — never in the browser.
+              </p>
             </div>
 
             {/* Pricing Settings */}

@@ -1,66 +1,64 @@
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../../backend/.env') });
-require('dotenv').config();
 const mongoose = require('mongoose');
+const env = require('./env');
+const logger = require('../utils/logger');
 
-let isMemoryServer = false;
-let memoryServerInstance = null;
+let memoryServer = null;
 
-const connectDB = async () => {
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/dailydrop_kitchen';
-  const isAtlas = uri.startsWith('mongodb+srv://') || uri.includes('mongodb.net');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  try {
-    // 1. Try connecting to configured MongoDB (Atlas or Local service)
-    const options = {
-      serverSelectionTimeoutMS: isAtlas ? 15000 : 3000,
-    };
+mongoose.set('strictQuery', true);
 
-    if (isAtlas) {
-      console.log('[Database] Connecting to MongoDB Atlas Cloud Cluster...');
-    }
+mongoose.connection.on('disconnected', () => logger.warn('[db] disconnected'));
+mongoose.connection.on('reconnected', () => logger.info('[db] reconnected'));
+mongoose.connection.on('error', (err) => logger.error('[db] error', err.message));
 
-    await mongoose.connect(uri, options);
-    console.log(`[Database] MongoDB Connected successfully: ${mongoose.connection.host}/${mongoose.connection.name}`);
-    if (isAtlas) {
-      console.log('[Database] Connected to remote MongoDB Atlas cluster.');
-    }
-    return;
-  } catch (err) {
-    if (isAtlas || process.env.NODE_ENV === 'production') {
-      console.error(`\n[Database] ❌ MongoDB Connection Failed: ${err.message}`);
-      if (isAtlas) {
-        console.error('[Database] Common Atlas fixes:');
-        console.error('  1. In MongoDB Atlas -> Network Access: Add IP Address -> "Allow Access from Anywhere" (0.0.0.0/0).');
-        console.error('  2. In MongoDB Atlas -> Database Access: Check that your database username and password are correct.');
-        console.error('  3. Ensure special characters in your password are URL encoded (e.g. @ -> %40).\n');
-      }
-      throw err;
-    }
+/**
+ * Connect with exponential backoff. Bookings rely on multi-document
+ * transactions, so the target must be a replica set (MongoDB Atlas is).
+ * An in-memory replica set is only used when explicitly requested outside
+ * production (USE_IN_MEMORY_DB=true) — never as a silent fallback.
+ */
+const connectDB = async (uriOverride) => {
+  let uri = uriOverride || env.MONGODB_URI;
 
-    console.warn(`[Database] Standard local MongoDB connection to ${uri} failed: ${err.message}`);
-    console.log('[Database] Initiating in-memory MongoDB environment for local development only...');
+  if (!uri && env.USE_IN_MEMORY_DB && !env.isProd) {
+    const { MongoMemoryReplSet } = require('mongodb-memory-server');
+    memoryServer = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+    uri = memoryServer.getUri('dailydrop_dev');
+    logger.warn('[db] Using an in-memory MongoDB replica set. Data is lost on restart.');
+  }
 
+  if (!uri) {
+    throw new Error('MONGODB_URI is not set. For local throwaway data set USE_IN_MEMORY_DB=true.');
+  }
+
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
     try {
-      const { MongoMemoryServer } = require('mongodb-memory-server');
-      memoryServerInstance = await MongoMemoryServer.create();
-      const memoryUri = memoryServerInstance.getUri();
-      
-      await mongoose.connect(memoryUri);
-      isMemoryServer = true;
-      console.log(`[Database] In-Memory MongoDB running at: ${memoryUri}`);
-    } catch (memErr) {
-      console.error('[Database] Failed to initialize in-memory MongoDB:', memErr.message);
-      throw memErr;
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000, retryWrites: true });
+      logger.info(`[db] connected to ${mongoose.connection.host}/${mongoose.connection.name}`);
+      break;
+    } catch (err) {
+      if (attempt >= env.DB_CONNECT_RETRIES) throw err;
+      const wait = Math.min(30000, 500 * 2 ** attempt);
+      logger.warn(`[db] connect attempt ${attempt} failed (${err.message}); retrying in ${wait}ms`);
+      await sleep(wait);
     }
   }
+
+  // Build indexes (including the unique slot index) before serving traffic.
+  await Promise.all(Object.values(mongoose.models).map((m) => m.init()));
 };
+
+const isDbUp = () => mongoose.connection.readyState === 1;
 
 const closeDB = async () => {
   await mongoose.disconnect();
-  if (memoryServerInstance) {
-    await memoryServerInstance.stop();
+  if (memoryServer) {
+    await memoryServer.stop();
+    memoryServer = null;
   }
 };
 
-module.exports = { connectDB, closeDB };
+module.exports = { connectDB, closeDB, isDbUp };

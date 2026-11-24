@@ -1,62 +1,73 @@
-const {
-  DEFAULT_HOURLY_RATE,
-  MIN_RENTAL_HOURS,
-  GST_RATE,
-  KITCHEN_SECURITY_DEPOSIT,
-} = require('../config/constants');
+const { STORAGE_PRICING, MAX_BOOKING_HOURS } = require('../config/constants');
+const { toCents, addGst, splitGstInclusive } = require('../utils/money');
+const { diffDays, addDays } = require('../utils/perthTime');
+const { badRequest } = require('../utils/httpError');
 
 /**
- * Tiered commercial kitchen rates (ex-GST) when standard $38/hr rate is active
+ * Kitchen hire is priced ex-GST from KitchenConfig: a package price when the
+ * duration matches a package, otherwise hourly rate x hours.
  */
-const STANDARD_TIER_SUBTOTALS = {
-  4: 152.0,
-  6: 204.0,
-  8: 256.0,
-  10: 310.0,
-  12: 360.0,
-  24: 696.0,
-};
-
-/**
- * Single source of truth for commercial kitchen shift pricing (AUD)
- */
-const calculateBookingPricing = (durationHours, config = {}) => {
-  const minHours = Number(config.min_rental_hours || MIN_RENTAL_HOURS);
-  const hourlyRate = Number(config.hourly_rental_rate || DEFAULT_HOURLY_RATE);
-  const cleaningFee = Number(config.cleaning_fee || 0);
-  const securityDeposit = Number(config.security_deposit ?? KITCHEN_SECURITY_DEPOSIT);
-
-  const duration = Number(durationHours);
-  if (!Number.isFinite(duration) || duration < minHours || duration > 24) {
-    const err = new Error(`Duration must be between ${minHours} and 24 hours.`);
-    err.statusCode = 400;
-    throw err;
+const quoteKitchen = (config, durationHours) => {
+  const hours = Number(durationHours);
+  if (!Number.isFinite(hours) || hours <= 0 || hours > MAX_BOOKING_HOURS || (hours * 2) % 1 !== 0) {
+    throw badRequest(`Duration must be between 0.5 and ${MAX_BOOKING_HOURS} hours, in half-hour steps.`);
   }
-
-  let basePrice;
-  if (hourlyRate === 38 && STANDARD_TIER_SUBTOTALS[duration] !== undefined) {
-    basePrice = STANDARD_TIER_SUBTOTALS[duration];
-  } else {
-    basePrice = Number((duration * hourlyRate).toFixed(2));
+  if (hours < config.min_rental_hours) {
+    throw badRequest(`Minimum booking is ${config.min_rental_hours} hours.`);
   }
-
-  const subtotal = Number((basePrice + cleaningFee).toFixed(2));
-  const gst = Number((subtotal * GST_RATE).toFixed(2));
-  const totalPrice = Number((subtotal + gst).toFixed(2));
-
+  const pkg = (config.packages || []).find((p) => Number(p.hours) === hours);
+  const baseCents = pkg ? toCents(pkg.price) : toCents(config.hourly_rental_rate * hours);
+  const cleaningCents = toCents(config.cleaning_fee || 0);
+  const { gst, inc_gst } = addGst(baseCents + cleaningCents);
   return {
-    duration_hours: duration,
-    hourly_rate: hourlyRate,
-    base_price: basePrice,
-    cleaning_fee: cleaningFee,
-    subtotal,
-    gst,
-    total_price: totalPrice,
-    security_deposit: securityDeposit, // Non-taxable escrow bond
+    hours,
+    label: pkg?.label || `${hours}-hour shift`,
+    base_cents: baseCents,
+    cleaning_cents: cleaningCents,
+    gst_cents: gst,
+    total_cents: inc_gst,
+    deposit_cents: toCents(config.security_deposit || 0),
   };
 };
 
-module.exports = {
-  STANDARD_TIER_SUBTOTALS,
-  calculateBookingPricing,
+/**
+ * Storage is priced GST-inclusive. end_date is the move-out date (exclusive);
+ * a same-day end counts as one day. This fixes the old client-side maths
+ * that counted days inclusively and charged two months for a 30-day lease.
+ */
+const quoteStorage = ({ start_date, end_date, duration_type }) => {
+  const rawDays = diffDays(start_date, end_date);
+  if (rawDays < 0) throw badRequest('End date must be on or after the start date.');
+  if (rawDays > 366) throw badRequest('Storage terms are limited to 12 months per booking.');
+  const days = Math.max(1, rawDays);
+  const P = STORAGE_PRICING;
+
+  let totalDollars;
+  switch (duration_type) {
+    case 'daily':
+      totalDollars = P.daily * days;
+      break;
+    case 'weekly':
+      totalDollars = P.weekly * Math.ceil(days / 7);
+      break;
+    case 'monthly':
+      totalDollars = P.monthly * Math.ceil(days / 30);
+      break;
+    default:
+      if (days > 31) totalDollars = P.long_term_daily * days;
+      else if (days === 1) totalDollars = P.daily;
+      else if (days <= 7) totalDollars = P.weekly * Math.ceil(days / 7);
+      else totalDollars = P.monthly * Math.ceil(days / 30);
+  }
+
+  const { gst, inc_gst } = splitGstInclusive(toCents(totalDollars));
+  return {
+    days,
+    occupied_until: addDays(start_date, days),
+    total_cents: inc_gst,
+    gst_cents: gst,
+    deposit_cents: toCents(P.security_deposit),
+  };
 };
+
+module.exports = { quoteKitchen, quoteStorage };

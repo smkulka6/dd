@@ -74,7 +74,13 @@ export const Pricing: React.FC<PricingProps> = ({ config, onSelectDuration }) =>
         'Dedicated facility support',
       ],
     },
-  ];
+  ].map((t) => {
+    // Prices come from the server config when it's loaded, so this page always matches what's charged.
+    const pkg = config?.packages?.find((p) => p.hours === t.duration);
+    if (!pkg) return t;
+    const perHour = pkg.price / t.duration;
+    return { ...t, price: pkg.price, hourlyRateNote: `$${perHour % 1 === 0 ? perHour : perHour.toFixed(2)} / hour` };
+  });
 
   return (
     <section id="pricing" className="py-10 lg:py-14 bg-brand-cream/40 relative">

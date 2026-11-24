@@ -1,184 +1,146 @@
-const Booking = require('../models/Booking');
-const BookingSlot = require('../models/BookingSlot');
-const StorageBooking = require('../models/StorageBooking');
 const Invoice = require('../models/Invoice');
-const { queryGeminiWatchdog } = require('../services/geminiService');
-const { createInvoiceForBooking, createInvoiceForStorage } = require('../services/invoiceService');
-const { calculateBookingPricing } = require('../services/pricingService');
-const { isShiftWithin24Hours } = require('../utils/dateUtils');
-const { generateDoorPin } = require('../config/constants');
+const Booking = require('../models/Booking');
+const StorageBooking = require('../models/StorageBooking');
+const invoiceService = require('../services/invoiceService');
+const bookingService = require('../services/bookingService');
+const storageService = require('../services/storageService');
+const gemini = require('../services/geminiService');
+const outbox = require('../services/outboxService');
+const { bookingRow, storageRow } = require('../services/syncPayloads');
+const { perthToUtc, perthToday } = require('../utils/perthTime');
+const { toDollars } = require('../utils/money');
+const { asyncHandler, notFound, conflict } = require('../utils/httpError');
 
-/**
- * @desc    Get persisted ATO invoices (Admins see all; Hirers see strictly their own)
- * @route   GET /api/invoices
- */
-const getInvoices = async (req, res, next) => {
-  try {
-    const isAdmin = req.user && (req.user.role === 'staff_admin' || req.user.role === 'super_admin');
-
-    // Backfill any legacy seeded bookings/storages that don't yet have a persisted Invoice document
-    if (isAdmin) {
-      const existingRefs = new Set((await Invoice.find().select('booking_reference').lean()).map((i) => i.booking_reference));
-      const bookings = await Booking.find().lean();
-      for (const b of bookings) {
-        if (!existingRefs.has(b.reference_code)) {
-          const pricing = calculateBookingPricing(b.duration_hours || 4, {
-            hourly_rental_rate: b.hourly_rate || 38,
-            min_rental_hours: 4,
-            cleaning_fee: b.cleaning_fee || 0,
-            security_deposit: b.security_deposit || 750,
-          });
-          const inv = await createInvoiceForBooking(b, pricing);
-          if (b.payment_status === 'paid') {
-            inv.status = 'paid';
-            inv.paid_at = b.paid_at || new Date();
-            await inv.save();
-          } else if (b.status === 'rejected' || b.status === 'cancelled') {
-            inv.status = 'void';
-            await inv.save();
-          }
-        }
-      }
-
-      const storages = await StorageBooking.find().lean();
-      for (const s of storages) {
-        if (!existingRefs.has(s.reference_code)) {
-          const inv = await createInvoiceForStorage(s);
-          if (s.payment_status === 'paid') {
-            inv.status = 'paid';
-            inv.paid_at = new Date();
-            await inv.save();
-          }
-        }
-      }
-    }
-
-    const filter = isAdmin ? {} : { email: String(req.user?.email || '').toLowerCase() };
-    const invoices = await Invoice.find(filter).sort({ createdAt: -1 });
-    return res.json(invoices);
-  } catch (err) {
-    next(err);
+const serviceStart = (inv, bookingMap, storageMap) => {
+  if (inv.booking && bookingMap.has(String(inv.booking))) return bookingMap.get(String(inv.booking)).start_at;
+  if (inv.storage_booking && storageMap.has(String(inv.storage_booking))) {
+    return perthToUtc(storageMap.get(String(inv.storage_booking)).start_date, '00:00');
   }
+  return null;
 };
 
-/**
- * @desc    Update persisted invoice status (Mark paid, void/release slot)
- * @route   PATCH /api/invoices/:invoiceId/status
- */
-const updateInvoiceStatus = async (req, res, next) => {
-  try {
-    const { invoiceId } = req.params;
-    const { status, payment_method, notes } = req.body;
-
-    const invoice = await Invoice.findOne({
-      $or: [
-        { invoice_number: invoiceId },
-        ...(invoiceId.match(/^[0-9a-fA-F]{24}$/) ? [{ _id: invoiceId }] : []),
-      ],
+const withRisk = async (invoices) => {
+  const bookingIds = invoices.filter((i) => i.booking).map((i) => i.booking);
+  const storageIds = invoices.filter((i) => i.storage_booking).map((i) => i.storage_booking);
+  const [bookings, storages] = await Promise.all([
+    Booking.find({ _id: { $in: bookingIds } }).select('start_at').lean(),
+    StorageBooking.find({ _id: { $in: storageIds } }).select('start_date').lean(),
+  ]);
+  const bMap = new Map(bookings.map((b) => [String(b._id), b]));
+  const sMap = new Map(storages.map((s) => [String(s._id), s]));
+  return invoices.map((inv) => {
+    const risk = invoiceService.assessRisk(inv, serviceStart(inv, bMap, sMap));
+    return inv.toPublicShape({
+      ai_risk_level: risk.level,
+      ai_risk_reason: risk.reason,
+      ai_recommended_action: risk.action,
+      risk_source: 'rules',
     });
+  });
+};
 
-    if (!invoice) {
-      return res.status(404).json({ success: false, error: `Invoice ${invoiceId} not found.` });
-    }
+const getInvoices = asyncHandler(async (req, res) => {
+  const list = await Invoice.find().sort({ createdAt: -1 }).limit(1000);
+  res.json(await withRisk(list));
+});
 
-    if (status) invoice.status = status;
-    if (payment_method) invoice.payment_method = payment_method;
-    if (notes !== undefined) invoice.notes = notes;
+/** Mark paid (records the payment on the linked booking too) or void an unpaid invoice. */
+const updateInvoiceStatus = asyncHandler(async (req, res) => {
+  const { status, payment_method, payment_reference, notes } = req.body;
+  const result = await bookingService.withTxn(async (session) => {
+    const inv = await Invoice.findOne({ invoice_number: req.params.invoiceId }).session(session);
+    if (!inv) throw notFound('Invoice not found.');
+
     if (status === 'paid') {
-      invoice.paid_at = new Date();
-    }
-    await invoice.save();
-
-    // Sync linked Booking or StorageBooking
-    if (invoice.booking_type === 'kitchen_rental') {
-      const booking = await Booking.findOne({ reference_code: invoice.booking_reference });
-      if (booking) {
-        if (status === 'paid') {
-          booking.payment_status = 'paid';
-          booking.paid_at = invoice.paid_at;
-          booking.payment_method = payment_method || 'PayID Direct Bank Transfer';
-          booking.status = 'confirmed';
-          if (!booking.door_access_pin) {
-            const pin = generateDoorPin();
-            booking.door_access_pin = pin;
-            booking.door_pin_code = pin;
-          }
-        } else if (status === 'void') {
-          booking.status = 'cancelled';
-          booking.admin_notes = notes || 'Voided by Super Admin';
-          await BookingSlot.deleteMany({ booking_id: booking._id });
-        }
-        await booking.save();
+      if (inv.status === 'void') throw conflict('A void invoice cannot be paid. Issue a new invoice.');
+      if (inv.status === 'paid') return inv;
+      if (inv.booking) {
+        const b = await Booking.findById(inv.booking).select('+access_code').session(session);
+        await bookingService.applyPayment(b, { method: payment_method, reference: payment_reference }, req.user, session);
+        await b.save({ session });
+        await outbox.enqueue('upsert_booking', { row: bookingRow(b) }, session);
+      } else if (inv.storage_booking) {
+        const s = await StorageBooking.findById(inv.storage_booking).select('+access_code').session(session);
+        await storageService.applyStoragePayment(s, { method: payment_method, reference: payment_reference }, req.user, session);
+        await s.save({ session });
+        await outbox.enqueue('upsert_storage', { row: storageRow(s) }, session);
+      } else {
+        inv.status = 'paid';
+        inv.paid_at = new Date();
+        inv.payments.push({ amount_cents: inv.amount_payable_cents, method: payment_method || 'Bank transfer / PayID', reference: payment_reference || '', recorded_by: req.user._id });
+        await inv.save({ session });
       }
-    } else if (invoice.booking_type === 'storage_lease') {
-      const storage = await StorageBooking.findOne({ reference_code: invoice.booking_reference });
-      if (storage) {
-        if (status === 'paid') {
-          storage.payment_status = 'paid';
-          storage.status = 'confirmed';
-        } else if (status === 'void') {
-          storage.status = 'cancelled';
-        }
-        await storage.save();
-      }
+      if (notes) await Invoice.updateOne({ _id: inv._id }, { notes }, { session });
+      return Invoice.findById(inv._id).session(session);
     }
 
-    return res.json({ success: true, invoice, message: `Invoice ${invoice.invoice_number} updated to ${status}` });
-  } catch (err) {
-    next(err);
-  }
-};
+    // void
+    if (inv.status === 'paid') {
+      throw conflict('This invoice is paid. Record a refund and issue an adjustment note instead of voiding it.');
+    }
+    if (inv.status === 'void') return inv;
+    inv.status = 'void';
+    inv.void_reason = notes || 'Voided by admin';
+    inv.voided_at = new Date();
+    await inv.save({ session });
+    if (inv.booking) {
+      const b = await Booking.findById(inv.booking).session(session);
+      if (b && ['pending', 'approved', 'confirmed'].includes(b.status)) {
+        b.status = 'cancelled';
+        b.hold_expires_at = undefined;
+        await bookingService.releaseAndVoid(b, inv.void_reason, session);
+        await b.save({ session });
+        await outbox.enqueue('upsert_booking', { row: bookingRow(b) }, session);
+      }
+    } else if (inv.storage_booking) {
+      const s = await StorageBooking.findById(inv.storage_booking).session(session);
+      if (s && ['pending', 'approved', 'confirmed'].includes(s.status)) {
+        s.status = 'cancelled';
+        s.hold_expires_at = undefined;
+        await s.save({ session });
+        await outbox.enqueue('upsert_storage', { row: storageRow(s) }, session);
+      }
+    }
+    return inv;
+  });
+  const [shaped] = await withRisk([result]);
+  res.json({ success: true, invoice: shaped });
+});
 
-/**
- * @desc    Ask Agentic AI Copilot (Gemini / Watchdog) — Admin Only, Real Ledger Data
- * @route   POST /api/invoices/ai-query
- */
-const askAiCopilot = async (req, res, next) => {
-  try {
-    const { query } = req.body;
-    const invoices = await Invoice.find({ status: { $ne: 'void' } }).lean();
-    const bookings = await Booking.find().lean();
+const createCustomInvoice = asyncHandler(async (req, res) => {
+  const inv = await bookingService.withTxn((session) => invoiceService.issueCustom(req.body, { session, issuedBy: req.user }));
+  const [shaped] = await withRisk([inv]);
+  res.status(201).json(shaped);
+});
 
-    const totalInvoiced = invoices.reduce((sum, inv) => sum + (Number(inv.total_amount) || 0), 0);
-    const paidRevenue = invoices
-      .filter((inv) => inv.status === 'paid')
-      .reduce((sum, inv) => sum + (Number(inv.total_amount) || 0), 0);
-    const pendingAmount = Math.max(0, totalInvoiced - paidRevenue);
-    const bondsHeld = invoices
-      .filter((inv) => inv.status === 'paid')
-      .reduce((sum, inv) => sum + (Number(inv.security_deposit) || 0), 0);
-
-    const urgent = bookings.filter(
-      (b) =>
-        b.status !== 'cancelled' &&
-        b.status !== 'rejected' &&
-        b.payment_status !== 'paid' &&
-        isShiftWithin24Hours(b.booking_date, b.start_time)
-    );
-
-    const ctx = {
-      totalInvoicedAUD: totalInvoiced.toFixed(2),
-      paidRevenueAUD: paidRevenue.toFixed(2),
-      pendingRevenueAUD: pendingAmount.toFixed(2),
-      bondsHeldAUD: bondsHeld.toFixed(2),
-      totalInvoicesCount: invoices.length,
-      urgentAttentionCount: urgent.length,
-      urgentTenants: urgent.map((u) => ({
-        tenant: u.full_name,
-        business: u.business_name,
-        amount: u.total_price,
+const askAssistant = asyncHandler(async (req, res) => {
+  const invoices = await Invoice.find({ status: { $in: ['pending', 'paid'] } }).lean();
+  const today = perthToday();
+  const pending = invoices.filter((i) => i.status === 'pending');
+  const paid = invoices.filter((i) => i.status === 'paid');
+  const sum = (arr, f) => toDollars(arr.reduce((s, i) => s + (i[f] || 0), 0));
+  const ctx = {
+    today_perth: today,
+    totals: {
+      invoiced_inc_gst_aud: sum(invoices, 'total_inc_gst_cents'),
+      paid_inc_gst_aud: sum(paid, 'total_inc_gst_cents'),
+      gst_paid_aud: sum(paid, 'gst_cents'),
+      outstanding_aud: sum(pending, 'amount_payable_cents'),
+      bonds_received_aud: sum(paid, 'security_deposit_cents'),
+    },
+    outstanding: pending
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))
+      .slice(0, 25)
+      .map((i) => ({
+        invoice_number: i.invoice_number,
+        customer: i.buyer?.name,
+        business: i.buyer?.business_name,
+        amount_payable: toDollars(i.amount_payable_cents),
+        due_date: i.due_date,
+        overdue: i.due_date < today,
       })),
-    };
+  };
+  res.json(await gemini.ask(req.body.query, ctx));
+});
 
-    const aiRes = await queryGeminiWatchdog(query || 'Financial summary', ctx);
-    return res.json(aiRes);
-  } catch (err) {
-    next(err);
-  }
-};
-
-module.exports = {
-  getInvoices,
-  updateInvoiceStatus,
-  askAiCopilot,
-};
+module.exports = { getInvoices, updateInvoiceStatus, createCustomInvoice, askAssistant };

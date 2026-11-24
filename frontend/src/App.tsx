@@ -47,6 +47,18 @@ export function App() {
   const [bookingDuration, setBookingDuration] = useState<number | undefined>(undefined);
   const [bookingServiceTab, setBookingServiceTab] = useState<'kitchen' | 'storage'>('kitchen');
 
+  // Re-validate a stored customer session with the server, and drop it if the server rejects it.
+  useEffect(() => {
+    if (api.getUserToken()) {
+      api.refreshCurrentUser().then((u) => setCurrentUser(u));
+    }
+    const onExpired = (e: Event) => {
+      if ((e as CustomEvent).detail?.scope === 'user') setCurrentUser(null);
+    };
+    window.addEventListener('dd:auth-expired', onExpired);
+    return () => window.removeEventListener('dd:auth-expired', onExpired);
+  }, []);
+
   // Load config on startup
   useEffect(() => {
     async function loadConfig() {
@@ -172,7 +184,7 @@ export function App() {
           api.userLogout();
           setCurrentUser(null);
         }}
-        isAdminLoggedIn={Boolean(localStorage.getItem('dd_admin_token'))}
+        isAdminLoggedIn={Boolean(api.getAdminToken())}
       />
 
       <main className="flex-1">

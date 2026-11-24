@@ -1,3 +1,4 @@
+import { perthToday, addDaysToDate } from '../services/api';
 import React, { useState, useEffect } from 'react';
 import { 
   Calendar, 
@@ -21,9 +22,7 @@ interface HeroProps {
 
 export const Hero: React.FC<HeroProps> = ({ config, onQuickBook, onExploreFacilities }) => {
   // Tomorrow's date formatted as YYYY-MM-DD
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+  const tomorrowStr = addDaysToDate(perthToday(), 1); // Perth date, not UTC
 
   const [selectedDate, setSelectedDate] = useState(tomorrowStr);
   const [selectedTime, setSelectedTime] = useState('09:00');

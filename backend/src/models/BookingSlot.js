@@ -1,32 +1,18 @@
 const mongoose = require('mongoose');
 
-const bookingSlotSchema = new mongoose.Schema(
-  {
-    slot_date: {
-      type: String, // YYYY-MM-DD in Australia/Perth
-      required: true,
-    },
-    slot_hour: {
-      type: Number, // 0..23
-      required: true,
-      min: 0,
-      max: 23,
-    },
-    booking_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Booking',
-      required: true,
-      index: true,
-    },
-    reference_code: {
-      type: String,
-      required: true,
-    },
-  },
-  { timestamps: true }
-);
-
-// Atomic concurrency lock: guarantees two bookings can never occupy the same date+hour
-bookingSlotSchema.index({ slot_date: 1, slot_hour: 1 }, { unique: true });
+/**
+ * One document per occupied 30-minute slot of the kitchen.
+ *
+ * The unique index on slot_start is what makes double-booking impossible:
+ * two bookings (or a booking and a maintenance block) can never both own the
+ * same slot, no matter how many requests arrive at once. Bookings insert
+ * their slots inside the same transaction as the booking itself.
+ */
+const bookingSlotSchema = new mongoose.Schema({
+  slot_start: { type: Date, required: true, unique: true },
+  kind: { type: String, enum: ['booking', 'block'], required: true },
+  booking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', index: true, sparse: true },
+  blocked_slot: { type: mongoose.Schema.Types.ObjectId, ref: 'BlockedSlot', index: true, sparse: true },
+});
 
 module.exports = mongoose.model('BookingSlot', bookingSlotSchema);

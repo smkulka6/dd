@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   CheckCircle, 
   Calendar, 
@@ -14,7 +14,8 @@ import {
   ShieldCheck,
   ArrowRight
 } from 'lucide-react';
-import { Booking } from '../types';
+import { Booking, PaymentDetails } from '../types';
+import { api } from '../services/api';
 
 interface BookingConfirmationModalProps {
   booking: Booking | null;
@@ -29,8 +30,13 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
 }) => {
   const [copiedRef, setCopiedRef] = useState(false);
   const [copiedBank, setCopiedBank] = useState(false);
+  const [pay, setPay] = useState<PaymentDetails | null>(null);
+  useEffect(() => {
+    api.getConfig().then((c) => setPay(c.payment_details || null)).catch(() => setPay(null));
+  }, []);
 
   if (!booking) return null;
+  const amountPayable = booking.amount_payable ?? booking.total_price + (booking.security_deposit || 0);
 
   const copyToClipboard = (text: string, type: 'ref' | 'bank') => {
     navigator.clipboard.writeText(text);
@@ -45,17 +51,11 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
 
   // Generate downloadable .ics calendar file
   const downloadICS = () => {
-    const [startH, startM] = (booking.start_time || '09:00').split(':').map(Number);
-    const [endH, endM] = (booking.end_time || '13:00').split(':').map(Number);
-    const [year, month, day] = (booking.booking_date || '2026-10-28').split('-').map(Number);
-
-    const formatICSDate = (y: number, m: number, d: number, hr: number, min: number) => {
-      const pad = (n: number) => String(n).padStart(2, '0');
-      return `${y}${pad(m)}${pad(d)}T${pad(hr)}${pad(min)}00`;
-    };
-
-    const startICS = formatICSDate(year, month, day, startH, startM);
-    const endICS = formatICSDate(year, month, day, endH, endM);
+    const toICS = (iso: string) => new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    const startIso = booking.start_at || `${booking.booking_date}T${booking.start_time}:00+08:00`;
+    const endIso = booking.end_at || new Date(Date.parse(startIso) + booking.duration_hours * 3600000).toISOString();
+    const startICS = toICS(startIso);
+    const endICS = toICS(endIso);
 
     const icsContent = [
       'BEGIN:VCALENDAR',
@@ -63,7 +63,7 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
       'PRODID:-//Daily Drop Kitchen//Rental Platform//EN',
       'BEGIN:VEVENT',
       `UID:${booking.reference_code}@dailydrop.today`,
-      `DTSTAMP:${startICS}Z`,
+      `DTSTAMP:${toICS(new Date().toISOString())}`,
       `DTSTART:${startICS}`,
       `DTEND:${endICS}`,
       `SUMMARY:Daily Drop Commercial Kitchen Rental (${booking.reference_code})`,
@@ -175,52 +175,89 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
               <CreditCard className="w-4 h-4 text-brand-orange" />
               <span>How to Pay (Direct Bank Transfer / PayID)</span>
             </div>
-            <button
-              onClick={() => {
-                const bankInfo = `Bank: Commonwealth Bank of Australia\nAccount Name: Daily Drop Commercial Kitchens Pty Ltd\nBSB: 066-123\nAccount Number: 1234 5678\nReference: ${booking.reference_code}\nPayID: payments@dailydrop.today\nAmount: $${booking.total_price.toFixed(2)} AUD`;
-                copyToClipboard(bankInfo, 'bank');
-              }}
-              className="text-xs text-brand-forest font-bold hover:underline flex items-center space-x-1 cursor-pointer"
-            >
-              {copiedBank ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedBank ? 'Copied Bank Details!' : 'Copy All Details'}</span>
-            </button>
+            {pay && (
+              <button
+                onClick={() => {
+                  const bankInfo = [
+                    pay.bank_name && `Bank: ${pay.bank_name}`,
+                    pay.account_name && `Account Name: ${pay.account_name}`,
+                    pay.bsb && `BSB: ${pay.bsb}`,
+                    pay.account_number && `Account Number: ${pay.account_number}`,
+                    pay.payid && `PayID: ${pay.payid}`,
+                    `Reference: ${booking.reference_code}`,
+                    `Amount: $${amountPayable.toFixed(2)} AUD`,
+                  ]
+                    .filter(Boolean)
+                    .join('\n');
+                  copyToClipboard(bankInfo, 'bank');
+                }}
+                className="text-xs text-brand-forest font-bold hover:underline flex items-center space-x-1 cursor-pointer"
+              >
+                {copiedBank ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedBank ? 'Copied Bank Details!' : 'Copy All Details'}</span>
+              </button>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 text-xs">
-            <div>
-              <span className="text-gray-500">Bank:</span>
-              <p className="font-bold text-brand-dark">Commonwealth Bank (CBA)</p>
+          {pay ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 text-xs">
+              {pay.bank_name && (
+                <div>
+                  <span className="text-gray-500">Bank:</span>
+                  <p className="font-bold text-brand-dark">{pay.bank_name}</p>
+                </div>
+              )}
+              {pay.account_name && (
+                <div>
+                  <span className="text-gray-500">Account Name:</span>
+                  <p className="font-bold text-brand-dark">{pay.account_name}</p>
+                </div>
+              )}
+              {pay.bsb && (
+                <div>
+                  <span className="text-gray-500">BSB:</span>
+                  <p className="font-mono font-bold text-brand-dark text-sm">{pay.bsb}</p>
+                </div>
+              )}
+              {pay.account_number && (
+                <div>
+                  <span className="text-gray-500">Account Number:</span>
+                  <p className="font-mono font-bold text-brand-dark text-sm">{pay.account_number}</p>
+                </div>
+              )}
+              <div>
+                <span className="text-gray-500">Required Description / Reference:</span>
+                <p className="font-mono font-extrabold text-brand-forest bg-brand-mint px-2 py-0.5 rounded w-fit text-sm">
+                  {booking.reference_code}
+                </p>
+              </div>
+              {pay.payid && (
+                <div>
+                  <span className="text-gray-500">Or pay via PayID:</span>
+                  <p className="font-bold text-brand-dark">{pay.payid}</p>
+                </div>
+              )}
             </div>
-            <div>
-              <span className="text-gray-500">Account Name:</span>
-              <p className="font-bold text-brand-dark">Daily Drop Commercial Kitchens Pty Ltd</p>
+          ) : (
+            <p className="pt-3 text-xs text-gray-600">
+              Daily Drop will email you payment details with your tax invoice. Quote reference{' '}
+              <span className="font-mono font-bold">{booking.reference_code}</span> when paying.
+            </p>
+          )}
+
+          <div className="mt-3 pt-3 border-t border-gray-100 space-y-1 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-600">Rental (inc. 10% GST):</span>
+              <span className="font-mono font-semibold">${booking.total_price.toFixed(2)}</span>
             </div>
-            <div>
-              <span className="text-gray-500">BSB:</span>
-              <p className="font-mono font-bold text-brand-dark text-sm">066-125</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Account Number:</span>
-              <p className="font-mono font-bold text-brand-dark text-sm">1098 7654</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Required Description / Reference:</span>
-              <p className="font-mono font-extrabold text-brand-forest bg-brand-mint px-2 py-0.5 rounded w-fit text-sm">
-                {booking.reference_code}
-              </p>
-            </div>
-            <div>
-              <span className="text-gray-500">Or Fast Pay via PayID:</span>
-              <p className="font-bold text-brand-dark">hello@dailydrop.today</p>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-600">Refundable security bond (no GST):</span>
+              <span className="font-mono font-semibold">${(booking.security_deposit || 0).toFixed(2)}</span>
             </div>
           </div>
-
           <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between text-xs">
-            <span className="font-medium text-gray-600">Total Due (Rental + 10% GST):</span>
-            <span className="font-black text-base text-brand-forest font-mono">
-              ${booking.total_price.toFixed(2)} AUD
-            </span>
+            <span className="font-medium text-gray-600">Total to transfer:</span>
+            <span className="font-black text-base text-brand-forest font-mono">${amountPayable.toFixed(2)} AUD</span>
           </div>
         </div>
 

@@ -16,7 +16,7 @@ import {
   Sparkles,
   Info
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, perthToday, addDaysToDate } from '../services/api';
 import { StorageType, StorageDurationType, StorageBooking, StorageAvailability } from '../types';
 import { CountryCodePhoneInput } from './CountryCodePhoneInput';
 
@@ -36,17 +36,9 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
   const [durationType, setDurationType] = useState<StorageDurationType>('monthly');
   
   // Dates
-  const [startDate, setStartDate] = useState<string>(() => {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    return tomorrow.toISOString().split('T')[0];
-  });
-
-  const [endDate, setEndDate] = useState<string>(() => {
-    const nextMonth = new Date();
-    nextMonth.setDate(nextMonth.getDate() + 31);
-    return nextMonth.toISOString().split('T')[0];
-  });
+  // Dates are Perth calendar dates. end_date is the move-out date.
+  const [startDate, setStartDate] = useState<string>(() => addDaysToDate(perthToday(), 1));
+  const [endDate, setEndDate] = useState<string>(() => addDaysToDate(perthToday(), 31));
 
   // Contact & Business fields
   const [fullName, setFullName] = useState(currentUser?.full_name || '');
@@ -75,59 +67,39 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
 
   // Handle duration type change
   useEffect(() => {
-    const s = new Date(startDate);
-    if (isNaN(s.getTime())) return;
-
-    if (durationType === 'daily') {
-      const e = new Date(s);
-      setEndDate(e.toISOString().split('T')[0]);
-    } else if (durationType === 'weekly') {
-      const e = new Date(s);
-      e.setDate(e.getDate() + 7);
-      setEndDate(e.toISOString().split('T')[0]);
-    } else if (durationType === 'monthly') {
-      const e = new Date(s);
-      e.setDate(e.getDate() + 30);
-      setEndDate(e.toISOString().split('T')[0]);
-    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return;
+    if (durationType === 'daily') setEndDate(addDaysToDate(startDate, 1));
+    else if (durationType === 'weekly') setEndDate(addDaysToDate(startDate, 7));
+    else if (durationType === 'monthly') setEndDate(addDaysToDate(startDate, 30));
   }, [durationType, startDate]);
 
-  // Check availability when dates change
+  // Availability and price both come from the server.
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   useEffect(() => {
-    if (startDate && endDate) {
-      try {
-        const result = api.checkStorageAvailability(startDate, endDate);
-        setAvailability(result);
-      } catch (err: any) {
-        console.warn('Storage check error:', err);
-      }
-    }
-  }, [startDate, endDate]);
+    let active = true;
+    if (!startDate || !endDate) return;
+    setAvailabilityError(null);
+    api
+      .checkStorageAvailability(startDate, endDate, durationType)
+      .then((result) => {
+        if (active) setAvailability(result);
+      })
+      .catch((err: any) => {
+        if (!active) return;
+        setAvailability(null);
+        setAvailabilityError(err.message || 'Could not check storage availability.');
+      });
+    return () => {
+      active = false;
+    };
+  }, [startDate, endDate, durationType]);
 
-  // Compute total price
-  const calculateTotal = () => {
-    if (!startDate || !endDate) return { days: 1, rate: 15, total: 15, bond: 200 };
-    const dStart = new Date(startDate);
-    const dEnd = new Date(endDate);
-    const days = Math.max(1, Math.round((dEnd.getTime() - dStart.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-
-    let total = 0;
-    if (durationType === 'daily' || days === 1) {
-      total = days * 15.0;
-    } else if (durationType === 'weekly' || days <= 7) {
-      total = 70.0 * Math.max(1, Math.ceil(days / 7));
-    } else if (durationType === 'monthly' || days <= 31) {
-      total = 220.0 * Math.max(1, Math.ceil(days / 30));
-    } else {
-      total = days * 8.0;
-    }
-
-    const bond = 200.0;
-    const rate = Number((total / days).toFixed(2));
-    return { days, rate, total, bond };
+  const pricing = {
+    days: availability?.quote?.days ?? 0,
+    rate: availability?.quote?.daily_rate ?? 0,
+    total: availability?.quote?.total_price ?? 0,
+    bond: availability?.quote?.security_deposit ?? 0,
   };
-
-  const pricing = calculateTotal();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,7 +116,7 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
     }
 
     if (!availability?.available) {
-      setSubmitError('Storage capacity reached (Max 2 tenants). Please select different dates.');
+      setSubmitError(availabilityError || 'Storage capacity reached (Max 2 tenants). Please select different dates.');
       return;
     }
 
@@ -208,12 +180,14 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
             <div className="text-xs font-semibold text-brand-forest">
               {availability ? (
                 availability.available ? (
-                  <span>🟢 {availability.available_bays_count} of 2 Bays Available</span>
+                  <span>🟢 {availability.available_bays_count} of {availability.max_bays} Bays Available</span>
                 ) : (
-                  <span className="text-red-600 font-bold">🔴 0 of 2 Available (At Capacity)</span>
+                  <span className="text-red-600 font-bold">🔴 0 of {availability.max_bays} Available (At Capacity)</span>
                 )
+              ) : availabilityError ? (
+                <span className="text-red-600 font-bold">{availabilityError}</span>
               ) : (
-                <span>Checking 2-Bay limit...</span>
+                <span>Checking bay availability...</span>
               )}
             </div>
           </div>
@@ -348,6 +322,7 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
                 <input
                   type="date"
                   required
+                  min={perthToday()}
                   value={startDate}
                   onChange={(e) => setStartDate(e.target.value)}
                   className="w-full px-4 py-2.5 rounded-xl border border-gray-300 bg-white text-brand-dark text-xs sm:text-sm font-semibold focus:ring-2 focus:ring-brand-forest focus:outline-none"
@@ -357,12 +332,13 @@ export const StorageBookingEngine: React.FC<StorageBookingEngineProps> = ({
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-brand-dark mb-1.5 flex items-center space-x-1.5">
                   <Clock className="w-3.5 h-3.5 text-brand-forest" />
-                  <span>End Date *</span>
+                  <span>Move-out Date *</span>
                 </label>
                 <input
                   type="date"
                   required
                   disabled={durationType !== 'custom'}
+                  min={startDate}
                   value={endDate}
                   onChange={(e) => setEndDate(e.target.value)}
                   className={`w-full px-4 py-2.5 rounded-xl border text-xs sm:text-sm font-semibold focus:ring-2 focus:ring-brand-forest focus:outline-none ${

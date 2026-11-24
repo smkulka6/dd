@@ -1,77 +1,65 @@
 /**
- * Daily Drop Commercial Kitchens - System Constants
- * Location: Victoria Park, Perth, WA 6101
- * Standards: WA Food Act 2008 & ATO Tax Compliance
+ * Business defaults. Kitchen pricing and hours are seeded into KitchenConfig
+ * (editable by admins); the server always prices bookings from that record,
+ * and the website renders the same table from GET /api/config.
  */
-
 module.exports = {
-  PERTH_TIMEZONE: process.env.PERTH_TIMEZONE || 'Australia/Perth',
-  
-  // Commercial Hourly Rates (AUD)
-  DEFAULT_HOURLY_RATE: 38.00,
-  MIN_RENTAL_HOURS: 4,
-  GST_RATE: 0.10, // 10% Australian GST
-
-  // Standard Shift Pricing
-  // 4 Hours @ $38 = $152 + $15.20 GST = $167.20 Total
-  STANDARD_4H_BASE: 152.00,
-  STANDARD_4H_TOTAL: 167.20,
-
-  // Refundable Escrow Security Bonds (AUD)
-  KITCHEN_SECURITY_DEPOSIT: 750.00,
-  STORAGE_SECURITY_DEPOSIT: 200.00,
-
-  // Commercial Storage Bays (Max 2 in Victoria Park Hub)
-  STORAGE_BAYS: [
-    {
-      id: 'bay-1',
-      bay_number: 1,
-      name: 'Dry Ambient Storage Bay A',
-      type: 'dry_storage',
-      monthly_rate: 150.00,
-      security_deposit: 200.00,
-      description: 'Dedicated commercial stainless racking, ambient dry goods, lockable unit.'
-    },
-    {
-      id: 'bay-2',
-      bay_number: 2,
-      name: 'Walk-In Cold Room Storage Bay B',
-      type: 'cold_storage',
-      monthly_rate: 250.00,
-      security_deposit: 200.00,
-      description: 'Controlled +2°C to +4°C commercial refrigeration bay with temperature logging.'
-    }
-  ],
-
-  // ATO Registered Entity & Verified Banking Details (Single Source of Truth)
-  LEGAL_ENTITY: 'Daily Drop Commercial Kitchens Pty Ltd',
-  ABN: process.env.FACILITY_ABN || '51 824 753 556',
-  EMAIL: process.env.FACILITY_EMAIL || 'hello@dailydrop.today',
-  PAYID: process.env.FACILITY_PAYID || 'hello@dailydrop.today',
-  BANK_NAME: process.env.FACILITY_BANK_NAME || 'Commonwealth Bank (CBA)',
-  BSB: process.env.FACILITY_BSB || '066-125',
-  ACCOUNT_NUMBER: process.env.FACILITY_ACCOUNT || '1098 7654',
-
-  // Operating Hours (24/7 commercial access for approved caterers)
-  OPERATING_START: '00:00',
-  OPERATING_END: '23:59',
-
-  // Helper to resolve JWT Secret safely
-  getJwtSecret: () => {
-    if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('FATAL: JWT_SECRET environment variable must be set in production.');
-    }
-    return 'dev_only_dailydrop_jwt_secret_do_not_use_in_prod';
-  },
-
-  // Generate unique 4-digit keypad PIN per confirmed & paid booking
-  generateDoorPin: () => `${Math.floor(1000 + Math.random() * 9000)}#`,
-
-  // User Roles
   ROLES: {
     HIRER: 'hirer',
     STAFF_ADMIN: 'staff_admin',
-    SUPER_ADMIN: 'super_admin'
-  }
+    SUPER_ADMIN: 'super_admin',
+  },
+  ADMIN_ROLES: ['staff_admin', 'super_admin'],
+
+  // Kitchen bookings are tracked in 30-minute slots (unique index per slot).
+  SLOT_MINUTES: 30,
+  MAX_BOOKING_HOURS: 24,
+
+  // Kitchen pricing, AUD ex-GST (matches the public pricing page).
+  DEFAULT_KITCHEN_CONFIG: {
+    hourly_rental_rate: 38.0,
+    min_rental_hours: 2,
+    packages: [
+      { hours: 2, price: 100.0, label: '2-Hour Quick Prep' },
+      { hours: 4, price: 152.0, label: '4-Hour Half-Shift' },
+      { hours: 8, price: 256.0, label: '8-Hour Full Production' },
+      { hours: 12, price: 360.0, label: '12-Hour Commercial Run' },
+    ],
+    operating_hours_start: '00:00',
+    operating_hours_end: '24:00',
+    cleaning_fee: 0,
+    security_deposit: 750.0,
+    kitchen_name: 'Daily Drop Commercial Kitchens (Victoria Park)',
+    kitchen_address: 'Unit 1, 1 Lichfield St, Victoria Park WA 6101',
+    kitchen_phone: '0479 175 705',
+    kitchen_email: 'hello@dailydrop.today',
+    kitchen_whatsapp: '+61479175705',
+    currency_symbol: '$',
+  },
+
+  // Storage pricing, AUD GST-inclusive (matches the storage booking page).
+  STORAGE_PRICING: {
+    daily: 15.0, // per day
+    weekly: 70.0, // per 7 days
+    monthly: 220.0, // per 30 days
+    long_term_daily: 8.0, // per day for custom terms over 31 days
+    security_deposit: 200.0,
+  },
+  STORAGE_TYPES: ['dry_storage', 'cool_room', 'freezer'],
+  STORAGE_DURATION_TYPES: ['daily', 'weekly', 'monthly', 'custom'],
+
+  // Statuses that hold capacity (slots / bays).
+  ACTIVE_BOOKING_STATUSES: ['pending', 'approved', 'confirmed'],
+  BOOKING_STATUSES: ['pending', 'approved', 'confirmed', 'rejected', 'cancelled', 'completed', 'expired'],
+
+  // Allowed admin transitions. Anything not listed is rejected.
+  STATUS_TRANSITIONS: {
+    pending: ['approved', 'rejected', 'cancelled'],
+    approved: ['confirmed', 'rejected', 'cancelled'],
+    confirmed: ['completed', 'cancelled'],
+    rejected: [],
+    cancelled: [],
+    completed: [],
+    expired: [],
+  },
 };

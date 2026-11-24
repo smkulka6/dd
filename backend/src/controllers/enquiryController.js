@@ -1,63 +1,33 @@
 const Enquiry = require('../models/Enquiry');
-const { postToGoogleSheet } = require('../services/googleSheetService');
+const outbox = require('../services/outboxService');
+const { enquiryRow } = require('../services/syncPayloads');
+const { enquiryRef } = require('../utils/refCode');
+const { asyncHandler } = require('../utils/httpError');
 
-/**
- * @desc    Submit a commercial kitchen contact enquiry
- * @route   POST /api/enquiries
- */
-const createEnquiry = async (req, res, next) => {
-  try {
-    const {
-      full_name,
-      business_name,
-      email,
-      phone,
-      preferred_contact,
-      rental_type,
-      registered_in_victoria_park,
-      message,
-    } = req.body;
+const createEnquiry = asyncHandler(async (req, res) => {
+  const b = req.body;
+  const enquiry = await Enquiry.create({
+    reference_code: enquiryRef(),
+    full_name: b.full_name || b.name,
+    business_name: b.business_name || '',
+    email: b.email,
+    phone: b.phone || '',
+    preferred_contact: b.preferred_contact || 'Email',
+    rental_type: b.rental_type || 'Hourly Commercial Kitchen Hire',
+    preferred_date: b.preferred_date || '',
+    estimated_hours: b.estimated_hours || '',
+    business_type: b.business_type || '',
+    registered_in_victoria_park: b.registered_in_victoria_park === true || b.registered_in_victoria_park === 'true' || b.registered_in_victoria_park === 'yes',
+    message: b.message,
+  });
+  await outbox.enqueue('upsert_enquiry', { row: enquiryRow(enquiry) });
+  // Only echo back what the visitor submitted, plus the reference.
+  res.status(201).json({
+    success: true,
+    message: 'Enquiry received. A Daily Drop manager will be in touch.',
+    reference_code: enquiry.reference_code,
+    enquiry: enquiry.toPublicShape(),
+  });
+});
 
-    const refCode = `ENQ-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const enquiry = await Enquiry.create({
-      reference_code: refCode,
-      full_name: full_name.trim(),
-      business_name: business_name || '',
-      email: String(email).trim().toLowerCase(),
-      phone: phone || '',
-      preferred_contact: preferred_contact || 'Email',
-      rental_type: rental_type || 'Hourly Commercial Kitchen Hire',
-      registered_in_victoria_park: Boolean(registered_in_victoria_park),
-      message: message || 'General Kitchen Rental Enquiry',
-      status: 'new',
-    });
-
-    // Sync to Google Sheets
-    await postToGoogleSheet({
-      action: 'submit_enquiry',
-      reference_code: refCode,
-      full_name: enquiry.full_name,
-      business_name: enquiry.business_name,
-      email: enquiry.email,
-      phone: enquiry.phone,
-      preferred_contact: enquiry.preferred_contact,
-      rental_type: enquiry.rental_type,
-      registered_in_victoria_park: enquiry.registered_in_victoria_park,
-      message: enquiry.message,
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Enquiry submitted successfully. A Daily Drop manager will be in touch.',
-      reference_code: refCode,
-      enquiry,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-module.exports = {
-  createEnquiry,
-};
+module.exports = { createEnquiry };

@@ -1,26 +1,18 @@
-# Node & Frontend dependencies
 node_modules/
-frontend/node_modules/
-backend/node_modules/
-.npm
-*.tsbuildinfo
-
-# Build output
 dist/
 build/
+*.tsbuildinfo
+.npm
 
-# Python & Backend
-__pycache__/
-*.py[cod]
-*$py.class
-*.db
-*.sqlite
-*.sqlite3
-.pytest_cache/
-
-# Environment files
+# Environment files (never commit real values)
 .env
-.env.local
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
 
 # IDE & OS
 .vscode/
@@ -28,7 +20,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Temp extraction directory
+# Raw photo dumps
 extracted_assets/
 DD kitchen pics/
 *.HEIC

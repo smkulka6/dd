@@ -1,516 +1,197 @@
 // @ts-nocheck
-/* global SpreadsheetApp, Utilities, MailApp, ContentService, Logger */
+/* global SpreadsheetApp, MailApp, ContentService, PropertiesService, LockService, CacheService, Utilities */
 /* eslint-disable no-unused-vars, no-undef */
 /**
- * DAILY DROP COMMERCIAL KITCHEN & STORAGE - GOOGLE APPS SCRIPT WEBHOOK
- * Timezone: Australia/Perth (AWST · UTC+8)
- * 
- * Instructions:
- * 1. Open Google Sheets (https://sheets.new)
- * 2. In the top menu, go to: Extensions > Apps Script
- * 3. Delete any code in the editor, and paste this entire code
- * 4. Click "Deploy" (top right) > "Manage deployments" (or "New deployment")
- * 5. Edit deployment or create new Web App:
- *    - Execute as: "Me"
- *    - Who has access: "Anyone" (VERY IMPORTANT)
- * 6. Click Deploy and copy the Web App URL into your .env or Admin Settings!
+ * DAILY DROP — Google Sheets reporting + customer email webhook (v2)
+ *
+ * The Node API is the source of truth. It sends each change here from a
+ * background queue, with retries. This script:
+ *   - rejects any request without the shared secret,
+ *   - upserts rows by reference code (retries never create duplicate rows),
+ *   - sends customer emails with every value HTML-escaped,
+ *   - exposes NO data over GET (the old version returned every booking to anyone).
+ *
+ * Setup
+ *   1. Extensions > Apps Script, paste this file.
+ *   2. Project Settings > Script Properties > add WEBHOOK_SECRET = a long random string
+ *      (the same value as GOOGLE_SHEET_WEBHOOK_SECRET on the server).
+ *   3. Deploy > New deployment > Web app. Execute as: Me. Who has access: Anyone.
+ *      ("Anyone" is required for the server to call it; the secret is what protects it.)
+ *   4. Put the /exec URL in GOOGLE_SHEET_WEBHOOK_URL on the server.
+ *   5. Delete the OLD deployment (Deploy > Manage deployments > Archive): its URL is public.
  */
 
-var PERTH_TZ = "Australia/Perth";
+var PERTH_TZ = 'Australia/Perth';
 
-function escapeHtml(str) {
-  return String(str || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+var SHEETS = {
+  Bookings: ['Updated (Perth)', 'Reference', 'Name', 'Business', 'ABN', 'Email', 'Phone', 'Start Date', 'Start Time',
+    'End Date', 'End Time', 'Hours', 'Base ex GST', 'GST', 'Total inc GST', 'Bond', 'Intended Use', 'Team Size',
+    'Status', 'Payment', 'Admin Notes'],
+  Storage: ['Updated (Perth)', 'Reference', 'Name', 'Business', 'ABN', 'Email', 'Phone', 'Storage Type', 'Bay',
+    'Start Date', 'End Date', 'Days', 'Total inc GST', 'Bond', 'Status', 'Payment'],
+  Enquiries: ['Updated (Perth)', 'Reference', 'Name', 'Business', 'Email', 'Phone', 'Preferred Contact', 'Type',
+    'Message', 'Status'],
+};
+
+var FIELD_MAP = {
+  Bookings: ['reference_code', 'full_name', 'business_name', 'abn', 'email', 'phone', 'booking_date', 'start_time',
+    'end_date', 'end_time', 'duration_hours', 'base_cost', 'gst_amount', 'total_cost', 'security_deposit',
+    'intended_use', 'team_size', 'status', 'payment_status', 'admin_notes'],
+  Storage: ['reference_code', 'full_name', 'business_name', 'abn', 'email', 'phone', 'storage_type', 'bay_number',
+    'start_date', 'end_date', 'duration_days', 'total_price', 'security_deposit', 'status', 'payment_status'],
+  Enquiries: ['reference_code', 'full_name', 'business_name', 'email', 'phone', 'preferred_contact', 'rental_type',
+    'message', 'status'],
+};
+
+function json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function isAuthorizedWebhook(secretProvided) {
-  var expected = PropertiesService.getScriptProperties().getProperty("WEBHOOK_SECRET");
-  if (!expected) return true; // Configure WEBHOOK_SECRET in Apps Script Project Properties to enforce
-  return secretProvided === expected;
+function safeEquals(a, b) {
+  a = String(a || '');
+  b = String(b || '');
+  if (!a || !b || a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
-function setupSheetHeaders() {
+function esc(v) {
+  return String(v === undefined || v === null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Prevent spreadsheet formula injection from user-entered text.
+function cell(v) {
+  var s = v === undefined || v === null ? '' : v;
+  if (typeof s === 'string' && /^[=+\-@]/.test(s)) return "'" + s;
+  return s;
+}
+
+function sheetFor(name) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  
-  // 1. Setup Bookings Sheet
-  var bookingsSheet = ss.getSheetByName("Bookings");
-  if (!bookingsSheet) {
-    bookingsSheet = ss.insertSheet("Bookings");
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(SHEETS[name]);
+    sh.getRange(1, 1, 1, SHEETS[name].length).setFontWeight('bold');
+    sh.setFrozenRows(1);
   }
-  if (bookingsSheet.getLastRow() === 0) {
-    var bookingHeaders = [
-      "Timestamp (Perth)",
-      "Booking Reference",
-      "Customer Name",
-      "Business Name",
-      "ABN",
-      "Email Address",
-      "Phone Number",
-      "Booking Date",
-      "Start Time (AWST)",
-      "Duration (Hours)",
-      "Rental Subtotal ($AUD)",
-      "GST 10% ($AUD)",
-      "Total Incl. GST ($AUD)",
-      "Security Bond ($AUD)",
-      "Intended Use",
-      "Team Size",
-      "Equipment Required",
-      "Status",
-      "Additional Notes"
-    ];
-    bookingsSheet.appendRow(bookingHeaders);
-    bookingsSheet.getRange(1, 1, 1, bookingHeaders.length).setFontWeight("bold").setBackground("#E8F4EC").setFontColor("#152217");
-    bookingsSheet.setFrozenRows(1);
-  }
-
-  // 2. Setup Storage Sheet (Max 2 Bays Capacity)
-  var storageSheet = ss.getSheetByName("Storage");
-  if (!storageSheet) {
-    storageSheet = ss.insertSheet("Storage");
-  }
-  if (storageSheet.getLastRow() === 0) {
-    var storageHeaders = [
-      "Timestamp (Perth)",
-      "Storage Reference",
-      "Tenant Name",
-      "Business Name",
-      "ABN",
-      "Email Address",
-      "Phone Number",
-      "Storage Type",
-      "Bay Number (1 or 2)",
-      "Start Date",
-      "End Date",
-      "Duration (Days)",
-      "Total Rental ($AUD)",
-      "Security Bond ($AUD)",
-      "Status",
-      "Special Notes"
-    ];
-    storageSheet.appendRow(storageHeaders);
-    storageSheet.getRange(1, 1, 1, storageHeaders.length).setFontWeight("bold").setBackground("#E0F2FE").setFontColor("#0369A1");
-    storageSheet.setFrozenRows(1);
-  }
-
-  // 3. Setup Enquiries Sheet
-  var enquiriesSheet = ss.getSheetByName("Enquiries");
-  if (!enquiriesSheet) {
-    enquiriesSheet = ss.insertSheet("Enquiries");
-  }
-  if (enquiriesSheet.getLastRow() === 0) {
-    var enquiryHeaders = [
-      "Timestamp (Perth)",
-      "Enquiry Reference",
-      "Full Name",
-      "Business Name",
-      "Email Address",
-      "Phone Number",
-      "Preferred Contact",
-      "Rental Type",
-      "Registered in Victoria Park?",
-      "Message / Details",
-      "Status"
-    ];
-    enquiriesSheet.appendRow(enquiryHeaders);
-    enquiriesSheet.getRange(1, 1, 1, enquiryHeaders.length).setFontWeight("bold").setBackground("#FFF3EB").setFontColor("#ED8533");
-    enquiriesSheet.setFrozenRows(1);
-  }
+  return sh;
 }
 
-// Handle Incoming Webhook Submissions (POST)
+function upsert(name, row) {
+  var sh = sheetFor(name);
+  var values = [Utilities.formatDate(new Date(), PERTH_TZ, 'yyyy-MM-dd HH:mm:ss')].concat(
+    FIELD_MAP[name].map(function (k) { return cell(row[k]); })
+  );
+  var last = sh.getLastRow();
+  if (last > 1) {
+    var refs = sh.getRange(2, 2, last - 1, 1).getDisplayValues();
+    for (var i = 0; i < refs.length; i++) {
+      if (refs[i][0] === row.reference_code) {
+        sh.getRange(i + 2, 1, 1, values.length).setValues([values]);
+        return;
+      }
+    }
+  }
+  sh.appendRow(values);
+}
+
+var SUBJECTS = {
+  booking_received: 'We received your kitchen booking request',
+  booking_approved: 'Your kitchen booking is approved — payment details inside',
+  booking_confirmed: 'Your kitchen booking is confirmed',
+  booking_rejected: 'Update on your kitchen booking request',
+  booking_cancelled: 'Your kitchen booking was cancelled',
+  booking_expired: 'Your unpaid kitchen hold has expired',
+  storage_received: 'We received your storage booking request',
+  storage_approved: 'Your storage booking is approved — payment details inside',
+  storage_confirmed: 'Your storage booking is confirmed',
+  storage_rejected: 'Update on your storage booking request',
+  storage_cancelled: 'Your storage booking was cancelled',
+};
+
+function row(label, value) {
+  return '<tr><td style="padding:6px 0;color:#6B7280">' + esc(label) + '</td><td style="padding:6px 0;font-weight:bold">' + esc(value) + '</td></tr>';
+}
+
+function sendEmail(email) {
+  if (!email || !email.to || !SUBJECTS[email.template]) return;
+  var d = email.data || {};
+  var p = d.payment;
+  var needsPayment = /received|approved/.test(email.template);
+  var lines = '';
+  lines += row('Reference', d.reference_code);
+  if (d.booking_date) lines += row('Starts', d.booking_date + ' ' + (d.start_time || '') + ' AWST');
+  if (d.end_date) lines += row('Ends', d.end_date + ' ' + (d.end_time || '') + ' AWST');
+  if (d.start_date) lines += row('Storage', d.start_date + ' to ' + d.end_date + (d.bay_number ? ' (bay ' + d.bay_number + ')' : ''));
+  if (d.total !== undefined) lines += row('Total (inc GST)', '$' + Number(d.total).toFixed(2) + ' AUD');
+  if (d.bond !== undefined) lines += row('Refundable bond', '$' + Number(d.bond).toFixed(2) + ' AUD');
+  if (d.invoice_number) lines += row('Tax invoice', d.invoice_number + ' (due ' + d.due_date + ')');
+
+  var payBlock = '';
+  if (needsPayment && p) {
+    payBlock = '<h4 style="margin:16px 0 6px">How to pay</h4><table style="font-size:13px">' +
+      (p.account_name ? row('Account name', p.account_name) : '') +
+      (p.bank_name ? row('Bank', p.bank_name) : '') +
+      (p.bsb ? row('BSB', p.bsb) : '') +
+      (p.account_number ? row('Account', p.account_number) : '') +
+      (p.payid ? row('PayID', p.payid) : '') +
+      row('Reference to quote', d.reference_code) +
+      '</table><p style="font-size:12px;color:#6B7280">Unpaid holds are released automatically. Your door access code appears in your Daily Drop dashboard once payment is confirmed.</p>';
+  }
+  if (/confirmed/.test(email.template)) {
+    payBlock = '<p>Payment received — thank you. Log in to your Daily Drop dashboard to see your door access code.</p>';
+  }
+
+  var html = '<div style="font-family:Arial,sans-serif;max-width:560px;color:#1F2937">' +
+    '<h2 style="color:#112F21">' + esc(d.seller_name || 'Daily Drop') + '</h2>' +
+    '<p>Hi ' + esc(d.full_name || 'there') + ',</p>' +
+    '<p>' + esc(SUBJECTS[email.template]) + '.</p>' +
+    '<table style="font-size:13px">' + lines + '</table>' + payBlock +
+    '<p style="font-size:12px;color:#6B7280">Questions? ' + esc(d.seller_phone) + ' · ' + esc(d.seller_email) + '</p></div>';
+
+  MailApp.sendEmail({ to: String(email.to), subject: SUBJECTS[email.template], htmlBody: html });
+}
+
 function doPost(e) {
-  setupSheetHeaders();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-
+  var secret = PropertiesService.getScriptProperties().getProperty('WEBHOOK_SECRET');
+  var data;
   try {
-    var data;
-    if (e.postData && e.postData.contents) {
-      data = JSON.parse(e.postData.contents);
-    } else {
-      data = e.parameter;
+    data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+  } catch (err) {
+    return json({ status: 'error', message: 'bad json' });
+  }
+  if (!secret || !safeEquals(data.secret, secret)) {
+    return json({ status: 'error', message: 'unauthorized' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return json({ status: 'error', message: 'busy, retry' });
+  try {
+    var target = { upsert_booking: 'Bookings', upsert_storage: 'Storage', upsert_enquiry: 'Enquiries' }[data.action];
+    if (!target) return json({ status: 'error', message: 'unknown action' });
+    if (data.row && data.row.reference_code) upsert(target, data.row);
+
+    // Idempotent email: a retried job must not email the customer twice.
+    var cache = CacheService.getScriptCache();
+    if (data.email && data.job_id && !cache.get('sent:' + data.job_id)) {
+      sendEmail(data.email);
+      cache.put('sent:' + data.job_id, '1', 21600);
     }
-
-    var action = data.action || (data.booking_date ? "create_booking" : "submit_enquiry");
-    var timestamp = Utilities.formatDate(new Date(), PERTH_TZ, "yyyy-MM-dd HH:mm:ss");
-
-    // ==========================================
-    // ACTION: CREATE KITCHEN BOOKING
-    // ==========================================
-    if (action === "create_booking") {
-      var bookingsSheet = ss.getSheetByName("Bookings");
-      var refCode = data.reference_code || ("DD-BK-" + Math.floor(10000 + Math.random() * 90000));
-      
-      var duration = Number(data.duration_hours) || 4;
-      var subtotal = Number(data.base_cost) || (duration === 2 ? 100 : duration === 4 ? 152 : duration === 8 ? 256 : duration === 12 ? 360 : duration * 38);
-      var gst = Number(data.gst_amount) || (subtotal * 0.10);
-      var total = Number(data.total_cost) || (subtotal + gst);
-      var bond = Number(data.security_deposit) || 750;
-
-      // Prefix phone & time with apostrophe to ensure Google Sheets treats them as clean text
-      var cleanPhone = data.phone ? String(data.phone) : "";
-      if (cleanPhone && cleanPhone.indexOf("'") !== 0) cleanPhone = "'" + cleanPhone;
-
-      var cleanTime = data.start_time ? String(data.start_time) : "09:00";
-      if (cleanTime && cleanTime.indexOf("'") !== 0) cleanTime = "'" + cleanTime;
-
-      bookingsSheet.appendRow([
-        timestamp,
-        refCode,
-        data.full_name || "",
-        data.business_name || "N/A",
-        data.abn || "N/A",
-        data.email || "",
-        cleanPhone,
-        data.booking_date || "",
-        cleanTime,
-        duration,
-        subtotal.toFixed(2),
-        gst.toFixed(2),
-        total.toFixed(2),
-        bond.toFixed(2),
-        data.intended_use || "",
-        data.team_size || 1,
-        data.equipment_requirements || "All-Inclusive Commercial Kitchen Facility",
-        data.status || "pending_approval",
-        data.additional_notes || ""
-      ]);
-
-      // Automated confirmation email to customer with payment instructions
-      if (data.email) {
-        try {
-          var customerEmail = String(data.email).trim();
-          var custName = data.full_name || "Valued Customer";
-          var emailSubject = "Booking Received & Payment Required - Daily Drop Kitchen (" + refCode + ")";
-          var emailHtml = '<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #E8F4EC; border-radius: 12px; overflow: hidden; background: #ffffff;">' +
-            '<div style="background-color: #112F21; color: #ffffff; padding: 24px; text-align: center;">' +
-              '<h2 style="margin: 0; font-size: 20px; letter-spacing: 1px;">DAILY DROP COMMERCIAL KITCHEN</h2>' +
-              '<p style="margin: 6px 0 0; color: #ED8533; font-size: 13px; font-weight: bold;">Unit 1, 1 Lichfield St, Victoria Park, Perth WA 6101</p>' +
-            '</div>' +
-            '<div style="padding: 24px;">' +
-              '<div style="background: #FFF3EB; border: 1px solid #FCD3B6; border-radius: 10px; padding: 16px; margin-bottom: 20px;">' +
-                '<h3 style="color: #ED8533; margin: 0 0 6px 0; font-size: 15px;">⚠️ ACTION REQUIRED: PAYMENT TO CONFIRM YOUR SLOT</h3>' +
-                '<p style="margin: 0; font-size: 13px; color: #4B5563; line-height: 1.5;">' +
-                  'Your booking request has been received and the slot is temporarily on hold. ' +
-                  '<strong>Please note: You need to complete your payment before the slot is officially booked.</strong> ' +
-                  'After payment is verified, your slot will be locked in and your electronic door entry PIN will be sent.' +
-                '</p>' +
-              '</div>' +
-              '<p style="font-size: 14px; margin-top: 0;">Hi <strong>' + escapeHtml(custName) + '</strong>,</p>' +
-              '<p style="font-size: 13px; color: #374151; line-height: 1.5;">' +
-                'Thank you for booking with Daily Drop Commercial Kitchen. Here is your reservation summary:' +
-              '</p>' +
-              '<table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px;">' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Reference Code:</td><td style="padding: 8px 0; font-weight: bold; font-family: monospace; color: #112F21;">' + escapeHtml(refCode) + '</td></tr>' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Booking Date:</td><td style="padding: 8px 0; font-weight: bold;">' + escapeHtml(data.booking_date || 'N/A') + '</td></tr>' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Time & Duration:</td><td style="padding: 8px 0; font-weight: bold;">' + escapeHtml(data.start_time || '09:00') + ' AWST (' + duration + ' Hours)</td></tr>' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Business / ABN:</td><td style="padding: 8px 0; font-weight: bold;">' + escapeHtml(data.business_name || 'N/A') + ' (' + escapeHtml(data.abn || 'ABN on file') + ')</td></tr>' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Rental Total:</td><td style="padding: 8px 0; font-weight: bold; color: #112F21;">$' + total.toFixed(2) + ' AUD (incl. GST)</td></tr>' +
-                '<tr style="border-bottom: 1px solid #F3F4F6;"><td style="padding: 8px 0; color: #6B7280;">Security Bond:</td><td style="padding: 8px 0; font-weight: bold;">$' + bond.toFixed(2) + ' AUD (refundable)</td></tr>' +
-                '<tr><td style="padding: 8px 0; color: #6B7280;">Kitchen Access:</td><td style="padding: 8px 0; font-weight: bold; color: #166534;">All-Inclusive Commercial Kitchen Cookline</td></tr>' +
-              '</table>' +
-              '<div style="background: #F8FAF8; border: 1px solid #D1E5D5; border-radius: 10px; padding: 16px; margin: 20px 0;">' +
-                '<h4 style="margin: 0 0 10px 0; color: #112F21; font-size: 14px;">💳 Bank Transfer & PayID Details</h4>' +
-                '<p style="margin: 3px 0; font-size: 12px;"><strong>Bank:</strong> Commonwealth Bank of Australia</p>' +
-                '<p style="margin: 3px 0; font-size: 12px;"><strong>Account Name:</strong> Daily Drop Commercial Kitchens Pty Ltd</p>' +
-                '<p style="margin: 3px 0; font-size: 12px;"><strong>BSB:</strong> 066-125</p>' +
-                '<p style="margin: 3px 0; font-size: 12px;"><strong>Account Number:</strong> 1098 7654</p>' +
-                '<p style="margin: 3px 0; font-size: 12px;"><strong>PayID:</strong> hello@dailydrop.today</p>' +
-                '<p style="margin: 6px 0 0; font-size: 12px; color: #ED8533;"><strong>Reference to quote:</strong> <span style="font-family: monospace; font-size: 13px; font-weight: bold;">' + escapeHtml(refCode) + '</span></p>' +
-              '</div>' +
-              '<p style="font-size: 12px; color: #6B7280; line-height: 1.5; margin-bottom: 0;">' +
-                'Questions? Contact our kitchen manager on <strong>0479 175 705</strong> or email <strong>hello@dailydrop.today</strong>.' +
-              '</p>' +
-            '</div>' +
-          '</div>';
-
-          MailApp.sendEmail({
-            to: customerEmail,
-            subject: emailSubject,
-            htmlBody: emailHtml
-          });
-        } catch (mailErr) {
-          Logger.log("Email notification error: " + mailErr.toString());
-        }
-      }
-
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "success",
-        reference_code: refCode,
-        message: "Booking saved successfully in Google Sheets"
-      })).setMimeType(ContentService.MimeType.JSON);
-
-    // ==========================================
-    // ACTION: CREATE STORAGE BOOKING (MAX 2 BAYS)
-    // ==========================================
-    } else if (action === "create_storage_booking") {
-      var storageSheet = ss.getSheetByName("Storage");
-      var refCode = data.reference_code || ("DD-ST-" + Math.floor(10000 + Math.random() * 90000));
-      var bayNum = Number(data.bay_number) || 1;
-      var total = Number(data.total_price) || 220;
-      var bond = Number(data.security_deposit) || 200;
-
-      var cleanPhone = data.phone ? String(data.phone) : "";
-      if (cleanPhone && cleanPhone.indexOf("'") !== 0) cleanPhone = "'" + cleanPhone;
-
-      storageSheet.appendRow([
-        timestamp,
-        refCode,
-        data.full_name || "",
-        data.business_name || "N/A",
-        data.abn || "N/A",
-        data.email || "",
-        cleanPhone,
-        data.storage_type || "cool_room",
-        bayNum,
-        data.start_date || "",
-        data.end_date || "",
-        Number(data.duration_days) || 30,
-        total.toFixed(2),
-        bond.toFixed(2),
-        data.status || "pending_approval",
-        data.special_requirements || ""
-      ]);
-
-      // Confirmation email for storage
-      if (data.email) {
-        try {
-          var customerEmail = String(data.email).trim();
-          var custName = data.full_name || "Valued Tenant";
-          var emailSubject = "Storage Bay Request Received (" + refCode + ") - Daily Drop";
-          var emailHtml = '<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #E8F4EC; border-radius: 12px; overflow: hidden; background: #ffffff;">' +
-            '<div style="background-color: #112F21; color: #ffffff; padding: 24px; text-align: center;">' +
-              '<h2 style="margin: 0; font-size: 20px;">DAILY DROP COMMERCIAL STORAGE</h2>' +
-              '<p style="margin: 6px 0 0; color: #ED8533; font-size: 13px;">Unit 1, 1 Lichfield St, Victoria Park, Perth WA</p>' +
-            '</div>' +
-            '<div style="padding: 24px;">' +
-              '<h3 style="color: #112F21; margin-top: 0;">Storage Bay Reservation #' + refCode + '</h3>' +
-              '<p style="font-size: 13px; color: #374151;">Hi <strong>' + custName + '</strong>, your commercial storage space reservation (Bay #' + bayNum + ') is pending payment.</p>' +
-              '<table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px;">' +
-                '<tr><td style="padding: 6px 0; color: #6B7280;">Storage Type:</td><td style="padding: 6px 0; font-weight: bold;">' + (data.storage_type || 'Cool Room') + '</td></tr>' +
-                '<tr><td style="padding: 6px 0; color: #6B7280;">Dates:</td><td style="padding: 6px 0; font-weight: bold;">' + (data.start_date || '') + ' to ' + (data.end_date || '') + '</td></tr>' +
-                '<tr><td style="padding: 6px 0; color: #6B7280;">Rental Total:</td><td style="padding: 6px 0; font-weight: bold; color: #112F21;">$' + total.toFixed(2) + ' AUD</td></tr>' +
-                '<tr><td style="padding: 6px 0; color: #6B7280;">Security Bond:</td><td style="padding: 6px 0; font-weight: bold;">$' + bond.toFixed(2) + ' AUD</td></tr>' +
-              '</table>' +
-              '<div style="background: #F8FAF8; border: 1px solid #D1E5D5; border-radius: 10px; padding: 16px; margin: 16px 0;">' +
-                '<h4 style="margin: 0 0 8px 0; color: #112F21; font-size: 13px;">💳 Payment Details (CBA)</h4>' +
-                '<p style="margin: 2px 0; font-size: 12px;"><strong>BSB:</strong> 066-125 | <strong>Acc:</strong> 1098 7654</p>' +
-                '<p style="margin: 2px 0; font-size: 12px;"><strong>PayID:</strong> payments@dailydrop.today</p>' +
-                '<p style="margin: 4px 0 0; font-size: 12px; color: #ED8533;"><strong>Ref:</strong> ' + refCode + '</p>' +
-              '</div>' +
-            '</div>' +
-          '</div>';
-
-          MailApp.sendEmail({
-            to: customerEmail,
-            subject: emailSubject,
-            htmlBody: emailHtml
-          });
-        } catch (err) {}
-      }
-
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "success",
-        reference_code: refCode,
-        message: "Storage booking saved successfully"
-      })).setMimeType(ContentService.MimeType.JSON);
-
-    // ==========================================
-    // ACTION: SUBMIT CUSTOM ENQUIRY
-    // ==========================================
-    } else if (action === "submit_enquiry") {
-      var enquiriesSheet = ss.getSheetByName("Enquiries");
-      var enqRef = data.reference_code || ("DD-ENQ-" + Math.floor(10000 + Math.random() * 90000));
-      
-      var cleanPhone = data.phone ? String(data.phone) : "";
-      if (cleanPhone && cleanPhone.indexOf("'") !== 0) cleanPhone = "'" + cleanPhone;
-
-      enquiriesSheet.appendRow([
-        timestamp,
-        enqRef,
-        data.full_name || data.name || "",
-        data.business_name || "N/A",
-        data.email || "",
-        cleanPhone,
-        data.preferred_contact || "Email",
-        data.rental_type || data.business_type || "General Enquiry",
-        data.registered_in_victoria_park ? "Yes" : "No",
-        data.message || "",
-        "new"
-      ]);
-
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "success",
-        reference_code: enqRef,
-        message: "Enquiry saved successfully in Google Sheets"
-      })).setMimeType(ContentService.MimeType.JSON);
-
-    // ==========================================
-    // ACTION: UPDATE STATUS
-    // ==========================================
-    } else if (action === "update_booking_status") {
-      var bookingsSheet = ss.getSheetByName("Bookings");
-      var rows = bookingsSheet.getDataRange().getDisplayValues();
-      var targetRef = data.reference_code || "";
-      var found = false;
-
-      for (var i = 1; i < rows.length; i++) {
-        if (rows[i][1] === targetRef) {
-          if (data.status) bookingsSheet.getRange(i + 1, 18).setValue(data.status);
-          if (data.admin_notes) bookingsSheet.getRange(i + 1, 19).setValue(data.admin_notes);
-          found = true;
-          break;
-        }
-      }
-
-      return ContentService.createTextOutput(JSON.stringify({
-        status: found ? "success" : "not_found",
-        message: found ? "Booking status updated" : "Booking not found"
-      })).setMimeType(ContentService.MimeType.JSON);
-    }
-
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "error",
-      message: "Unrecognized action: " + action
-    })).setMimeType(ContentService.MimeType.JSON);
-
-  } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "error",
-      message: error.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
+    return json({ status: 'success' });
+  } catch (err) {
+    return json({ status: 'error', message: String(err) });
+  } finally {
+    lock.releaseLock();
   }
 }
 
-// Handle GET requests (Strictly uses getDisplayValues to eliminate timezone conversion bugs)
-function doGet(e) {
-  if (!isAuthorizedWebhook(e && e.parameter && e.parameter.secret)) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Unauthorized" })).setMimeType(ContentService.MimeType.JSON);
-  }
-  setupSheetHeaders();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var action = (e && e.parameter && e.parameter.action) || "get_all";
-
-  try {
-    // 1. GET BOOKINGS
-    if (action === "get_bookings" || action === "get_all") {
-      var sheet = ss.getSheetByName("Bookings");
-      // getDisplayValues returns exact cell strings without Date object timezone shifts!
-      var displayRows = sheet.getDataRange().getDisplayValues();
-      var bookings = [];
-      
-      for (var i = 1; i < displayRows.length; i++) {
-        var r = displayRows[i];
-        if (!r[1]) continue;
-
-        bookings.push({
-          id: i,
-          created_at: r[0],
-          reference_code: r[1],
-          full_name: r[2],
-          business_name: r[3],
-          abn: r[4],
-          email: r[5],
-          phone: r[6],
-          booking_date: r[7],
-          start_time: r[8],
-          duration_hours: Number(r[9]) || 4,
-          base_cost: Number(r[10]) || 0,
-          cleaning_fee: 0,
-          security_deposit: Number(r[13]) || 750,
-          total_cost: Number(r[12]) || 0,
-          intended_use: r[14],
-          team_size: Number(r[15]) || 1,
-          equipment_requirements: r[16],
-          status: r[17] || "pending",
-          additional_notes: r[18] || ""
-        });
-      }
-
-      if (action === "get_bookings") {
-        return ContentService.createTextOutput(JSON.stringify({ status: "success", data: bookings }))
-          .setMimeType(ContentService.MimeType.JSON);
-      }
-    }
-
-    // 2. GET STORAGE BOOKINGS
-    if (action === "get_storage_bookings") {
-      var sheet = ss.getSheetByName("Storage");
-      var displayRows = sheet.getDataRange().getDisplayValues();
-      var storageBookings = [];
-
-      for (var i = 1; i < displayRows.length; i++) {
-        var r = displayRows[i];
-        if (!r[1]) continue;
-
-        storageBookings.push({
-          id: i,
-          created_at: r[0],
-          reference_code: r[1],
-          full_name: r[2],
-          business_name: r[3],
-          abn: r[4],
-          email: r[5],
-          phone: r[6],
-          storage_type: r[7],
-          bay_number: Number(r[8]) || 1,
-          start_date: r[9],
-          end_date: r[10],
-          duration_days: Number(r[11]) || 30,
-          total_price: Number(r[12]) || 220,
-          security_deposit: Number(r[13]) || 200,
-          status: r[14] || "pending",
-          special_requirements: r[15] || ""
-        });
-      }
-
-      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: storageBookings }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-
-    // 3. GET ENQUIRIES
-    if (action === "get_enquiries") {
-      var sheet = ss.getSheetByName("Enquiries");
-      var displayRows = sheet.getDataRange().getDisplayValues();
-      var enquiries = [];
-
-      for (var i = 1; i < displayRows.length; i++) {
-        var r = displayRows[i];
-        if (!r[1]) continue;
-
-        enquiries.push({
-          id: i,
-          created_at: r[0],
-          reference_code: r[1],
-          full_name: r[2],
-          business_name: r[3],
-          email: r[4],
-          phone: r[5],
-          preferred_contact: r[6],
-          rental_type: r[7],
-          registered_in_victoria_park: r[8] === "Yes",
-          message: r[9],
-          status: r[10] || "new"
-        });
-      }
-
-      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: enquiries }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "success",
-      message: "Daily Drop Google Sheet Webhook is active (Australia/Perth timezone verified)"
-    })).setMimeType(ContentService.MimeType.JSON);
-
-  } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "error",
-      message: error.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
-  }
+// No data is served over GET.
+function doGet() {
+  return json({ status: 'ok' });
 }

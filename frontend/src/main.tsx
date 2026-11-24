@@ -27,10 +27,12 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     console.error('Unhandled React Error in Component Tree:', error, errorInfo);
   }
 
+  // Signs out and reloads. Only session keys are cleared; nothing else lives in the browser.
   handleClearCacheAndReload = () => {
     try {
-      localStorage.clear();
-      sessionStorage.clear();
+      ['dd_user_token', 'dd_current_user', 'dd_admin_token', 'dd_superadmin_token', 'dd_superadmin_user'].forEach((k) =>
+        localStorage.removeItem(k)
+      );
     } catch {}
     window.location.reload();
   };
@@ -47,17 +49,19 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
               Daily Drop Kitchen Platform
             </h2>
             <p className="text-brand-muted text-sm mb-4">
-              A browser runtime error occurred:
+              Something went wrong on this page. Please reload. If it keeps happening, call 0479 175 705.
             </p>
-            <pre className="bg-red-50 text-red-800 p-4 rounded-xl text-left text-xs font-mono mb-6 overflow-x-auto border border-red-100 max-h-64 whitespace-pre-wrap">
-              {this.state.error?.stack || this.state.error?.message || String(this.state.error)}
-            </pre>
+            {import.meta.env.DEV && (
+              <pre className="bg-red-50 text-red-800 p-4 rounded-xl text-left text-xs font-mono mb-6 overflow-x-auto border border-red-100 max-h-64 whitespace-pre-wrap">
+                {this.state.error?.stack || this.state.error?.message || String(this.state.error)}
+              </pre>
+            )}
             <div className="flex gap-4 justify-center">
               <button
                 onClick={this.handleClearCacheAndReload}
                 className="bg-brand-orange hover:bg-brand-orange-hover text-white px-6 py-2.5 rounded-xl font-bold text-sm shadow-md transition-all"
               >
-                Clear Storage Cache & Reload
+                Sign out & reload
               </button>
               <button
                 onClick={() => window.location.reload()}

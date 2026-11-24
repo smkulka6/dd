@@ -54,10 +54,11 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
   const [signupConfirmPassword, setSignupConfirmPassword] = useState('');
 
   // Compliance uploads
+  // Files are uploaded to the server after sign-up (stored privately, owner/admin access only).
   const [fssFileName, setFssFileName] = useState<string>('');
-  const [fssFileData, setFssFileData] = useState<string>('');
+  const [fssFile, setFssFile] = useState<File | null>(null);
   const [insuranceFileName, setInsuranceFileName] = useState<string>('');
-  const [insuranceFileData, setInsuranceFileData] = useState<string>('');
+  const [insuranceFile, setInsuranceFile] = useState<File | null>(null);
 
   // Terms & Conditions acceptance
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -78,24 +79,21 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      setErrorMessage('Uploaded file is too large. Please upload files under 10MB.');
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMessage('Uploaded file is too large. Please upload files under 5 MB.');
       return;
     }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      if (type === 'fss') {
-        setFssFileName(file.name);
-        // Only keep raw base64 if small (< 25KB) to prevent exceeding browser localStorage quota
-        setFssFileData(base64.length < 25000 ? base64 : '');
-      } else {
-        setInsuranceFileName(file.name);
-        setInsuranceFileData(base64.length < 25000 ? base64 : '');
-      }
-    };
-    reader.readAsDataURL(file);
+    if (!/\.(pdf|png|jpe?g)$/i.test(file.name)) {
+      setErrorMessage('Please upload a PDF, PNG or JPG file.');
+      return;
+    }
+    if (type === 'fss') {
+      setFssFileName(file.name);
+      setFssFile(file);
+    } else {
+      setInsuranceFileName(file.name);
+      setInsuranceFile(file);
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -128,8 +126,8 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
       return;
     }
 
-    if (signupPassword.length < 6) {
-      setErrorMessage('Password must be at least 6 characters long.');
+    if (signupPassword.length < 8) {
+      setErrorMessage('Password must be at least 8 characters long.');
       return;
     }
 
@@ -148,12 +146,9 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         business_name: signupBusiness || undefined,
         abn: signupAbn.trim() || undefined,
         phone: signupPhone.trim() || undefined,
-        food_safety_cert_name: fssFileName || undefined,
-        food_safety_cert_data: fssFileData || undefined,
-        liability_insurance_name: insuranceFileName || undefined,
-        liability_insurance_data: insuranceFileData || undefined,
+        food_safety_cert_file: fssFile,
+        liability_insurance_file: insuranceFile,
         terms_accepted: true,
-        terms_accepted_at: new Date().toISOString()
       });
 
       setSuccessMessage(`Account created successfully! Welcome, ${auth.user.full_name}!`);
@@ -162,41 +157,22 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
         onClose();
       }, 800);
     } catch (err: any) {
-      console.warn('Signup error:', err);
-      // Clean fallback if any quota error occurs
-      if (err?.message?.includes('exceeded the quota') || err?.name === 'QuotaExceededError') {
-        try {
-          const fallbackUser: UserType = {
-            id: Date.now(),
-            email: signupEmail.trim().toLowerCase(),
-            full_name: signupName.trim(),
-            business_name: signupBusiness.trim() || undefined,
-            abn: signupAbn.trim() || undefined,
-            phone: signupPhone.trim() || undefined,
-            food_safety_cert_name: fssFileName || undefined,
-            liability_insurance_name: insuranceFileName || undefined,
-            terms_accepted: true,
-            terms_accepted_at: new Date().toISOString()
-          };
-          setSuccessMessage(`Account created successfully! Welcome, ${fallbackUser.full_name}!`);
-          setTimeout(() => {
-            onAuthSuccess(fallbackUser);
-            onClose();
-          }, 800);
-          return;
-        } catch {}
+      // If the account was created but a document upload failed, the user is signed in; tell them clearly.
+      if (api.getCurrentUser()) {
+        setErrorMessage(`Your account was created, but a document upload failed: ${err.message}. You can upload it later from your dashboard.`);
+        setTimeout(() => {
+          const u = api.getCurrentUser();
+          if (u) onAuthSuccess(u);
+        }, 2500);
+      } else {
+        setErrorMessage(err.message || 'Sign up failed. Please check your information.');
       }
-      setErrorMessage(err.message || 'Sign up failed. Please check your information.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleFillDemo = () => {
-    setTab('login');
-    setLoginEmail('demo@dailydrop.today');
-    setLoginPassword('kitchen123');
-  };
+
 
   return (
     <>
@@ -347,16 +323,6 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                 )}
               </button>
 
-              {/* Quick Demo Credentials shortcut */}
-              <div className="pt-3 border-t border-gray-100 text-center">
-                <button
-                  type="button"
-                  onClick={handleFillDemo}
-                  className="text-xs text-brand-forest hover:text-brand-orange font-semibold underline cursor-pointer"
-                >
-                  Use Demo Account (demo@dailydrop.today / kitchen123)
-                </button>
-              </div>
             </form>
           )}
 
@@ -510,7 +476,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                           type="button"
                           onClick={() => {
                             setFssFileName('');
-                            setFssFileData('');
+                            setFssFile(null);
                           }}
                           className="text-red-500 hover:text-red-700 ml-2 font-bold cursor-pointer"
                         >
@@ -549,7 +515,7 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                           type="button"
                           onClick={() => {
                             setInsuranceFileName('');
-                            setInsuranceFileData('');
+                            setInsuranceFile(null);
                           }}
                           className="text-red-500 hover:text-red-700 ml-2 font-bold cursor-pointer"
                         >

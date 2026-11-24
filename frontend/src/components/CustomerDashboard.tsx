@@ -39,8 +39,8 @@ import {
   Package
 } from 'lucide-react';
 import { Images } from '../assets/images';
-import { api } from '../services/api';
-import { User as UserType, StorageBooking } from '../types';
+import { api, formatDisplayDate } from '../services/api';
+import { User as UserType, StorageBooking, Invoice, PaymentDetails } from '../types';
 
 interface CustomerDashboardProps {
   onBackToSite: () => void;
@@ -92,15 +92,21 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
 
   // Account profile state
   const [profileSaved, setProfileSaved] = useState<boolean>(false);
-  const [chefName, setChefName] = useState<string>(() => currentUser?.full_name || 'Michael Davies');
-  const [businessName, setBusinessName] = useState<string>(() => currentUser?.business_name || 'Perth Catering Co.');
-  const [chefEmail, setChefEmail] = useState<string>(() => currentUser?.email || 'michael.davies@example.com');
-  const [chefPhone, setChefPhone] = useState<string>(() => currentUser?.phone || '+61 412 345 678');
-  const [abnNumber, setAbnNumber] = useState<string>('54 123 456 789');
-  const [fssCert, setFssCert] = useState<string>('FSS-WA-2024-8891');
+  const [chefName, setChefName] = useState<string>(() => currentUser?.full_name || '');
+  const [businessName, setBusinessName] = useState<string>(() => currentUser?.business_name || '');
+  const [chefEmail, setChefEmail] = useState<string>(() => currentUser?.email || '');
+  const [chefPhone, setChefPhone] = useState<string>(() => currentUser?.phone || '');
+  const [abnNumber, setAbnNumber] = useState<string>(() => currentUser?.abn || '');
+  const [fssCert, setFssCert] = useState<string>(() => currentUser?.food_safety_cert_name || '');
+  const [profileError, setProfileError] = useState<string | null>(null);
 
-  // Payment mock state
-  const [paidInvoices, setPaidInvoices] = useState<string[]>(['REC-918', 'REC-890', 'REC-855']);
+  // Real invoices and payment details from the server
+  const [userInvoices, setUserInvoices] = useState<Invoice[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [pay, setPay] = useState<PaymentDetails | null>(null);
+  useEffect(() => {
+    api.getConfig().then((c) => setPay(c.payment_details || null)).catch(() => setPay(null));
+  }, []);
 
   // Synchronize chef details when user logs in/out
   useEffect(() => {
@@ -115,18 +121,24 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
   // Load bookings and storage leases for current user
   useEffect(() => {
     async function loadData() {
-      const email = currentUser?.email || 'demo@dailydrop.today';
+      if (!currentUser) return;
+      setLoadError(null);
       try {
-        const list = await api.getUserBookings(email);
-        if (list && list.length > 0) {
+        const list = await api.getUserBookings();
+        {
           setLiveUserBookings(list.map((b) => ({
             reference_code: b.reference_code,
             booking_date: b.booking_date,
-            date_time: `${b.booking_date}, ${b.start_time} – ${b.end_time}`,
+            date_time: `${formatDisplayDate(b.booking_date)}, ${b.start_time} – ${b.end_time}${b.end_date && b.end_date !== b.booking_date ? ' (next day)' : ''} AWST`,
             intended_use: b.intended_use,
             status: b.status === 'pending_approval' ? 'pending' : b.status,
             payment_status: b.payment_status || 'unpaid',
-            amount: b.total_price || b.total_cost || 167.20,
+            amount: b.amount_payable ?? b.total_price,
+            access_code: b.access_code,
+            start_at: b.start_at,
+            end_at: b.end_at,
+            end_date: b.end_date,
+            hold_expires_at: b.hold_expires_at,
             duration: `${b.duration_hours} hours`,
             team: `${b.team_size || 2} Persons`,
             equipment: b.equipment_requirements || 'All-Inclusive Commercial Equipment',
@@ -135,216 +147,57 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
             team_size: b.team_size || 2,
             start_time: b.start_time,
             end_time: b.end_time,
-            hourly_rate: b.hourly_rate || 38,
+            hourly_rate: b.hourly_rate,
             cleaning_fee: b.cleaning_fee || 0,
-            security_deposit: b.security_deposit || 750,
-            total_price: b.total_price || 167.20,
+            security_deposit: b.security_deposit || 0,
+            total_price: b.total_price,
           })));
         }
-      } catch (e) {
-        console.warn('Error fetching bookings:', e);
+      } catch (err: any) {
+        setLoadError(err.message || 'Could not load your bookings.');
       }
 
       try {
-        const stList = await api.getUserStorageBookings(email);
-        if (stList && stList.length > 0) {
-          setUserStorageBookings(stList);
-        } else {
-          // If demo user or none found for email, show the active commercial storage bay
-          const allSt = await api.getStorageBookings();
-          if (allSt && allSt.length > 0) {
-            setUserStorageBookings(allSt.slice(0, 1));
-          } else {
-            setUserStorageBookings([
-              {
-                id: 1,
-                reference_code: 'DD-ST-88102',
-                user_id: 1,
-                full_name: 'Chef Michael Davies',
-                business_name: 'Perth Catering Co.',
-                abn: '54 123 456 789',
-                email: 'demo@dailydrop.today',
-                phone: '+61 412 345 678',
-                storage_type: 'cool_room',
-                bay_number: 1,
-                start_date: '2026-10-15',
-                end_date: '2026-11-15',
-                duration_days: 31,
-                duration_type: 'monthly',
-                daily_rate: 7.10,
-                total_price: 220.00,
-                security_deposit: 200.00,
-                status: 'confirmed',
-                payment_status: 'paid',
-                special_requirements: 'Chilled dairy & prepared pastry rack storage',
-                created_at: '2026-10-14T08:00:00Z',
-              }
-            ]);
-          }
-        }
-      } catch (err) {
-        console.warn('Error fetching storage bookings:', err);
+        setUserStorageBookings(await api.getUserStorageBookings());
+        setUserInvoices(await api.getUserInvoices());
+      } catch (err: any) {
+        setLoadError(err.message || 'Could not load your storage bookings and invoices.');
       }
     }
     loadData();
   }, [currentUser]);
 
-  // Mock primary booking
-  const nextBooking = {
-    reference_code: 'DD-BK-001',
-    status: 'confirmed',
-    payment_status: 'unpaid',
-    intended_use: 'Corporate Luncheon Meal Prep',
-    location: 'Victoria Park, Perth',
-    booking_date: '2026-10-21',
-    start_time: '18:30',
-    end_time: '22:30',
-    duration_hours: 4,
-    team_size: 3,
-    equipment_requirements: 'Combi oven, 6-burner range, Prep benches',
-    total_price: 167.20,
-    hourly_rate: 38.00,
-    cleaning_fee: 0,
-    security_deposit: 750,
-  };
+  // Invoices as shown in the Payments tab (real, from the server)
+  const invoicesList = userInvoices.map((inv) => ({
+    id: inv.invoice_number,
+    ref: inv.booking_reference,
+    date: formatDisplayDate(inv.issue_date),
+    dueDate: formatDisplayDate(inv.due_date),
+    description: inv.line_items?.[0]?.description || inv.service_date_range || 'Daily Drop services',
+    amount: inv.amount_payable ?? inv.total_amount,
+    status: inv.status === 'paid' ? 'paid' : inv.status === 'void' ? 'void' : 'unpaid',
+  }));
 
-  const allBookings = [
-    {
-      date_time: 'Wed, 21 Oct 2026, 6:30 PM – 10:30 PM',
-      booking_date: '2026-10-21',
-      reference_code: 'DD-BK-001',
-      intended_use: 'Corporate Luncheon Meal Prep',
-      status: 'confirmed',
-      payment_status: paidInvoices.includes('INV-001') ? 'paid' : 'unpaid',
-      amount: 167.20,
-      duration: '4 hours',
-      team: '3 Persons',
-      equipment: 'Combi oven, 6-burner range, Prep benches',
-    },
-    {
-      date_time: 'Mon, 26 Oct 2026, 10:00 AM – 2:00 PM',
-      booking_date: '2026-10-26',
-      reference_code: 'DD-BK-003',
-      intended_use: 'Cloud Kitchen Prep & Packaging',
-      status: 'approved',
-      payment_status: paidInvoices.includes('INV-003') ? 'paid' : 'unpaid',
-      amount: 167.20,
-      duration: '4 hours',
-      team: '2 Persons',
-      equipment: 'Prep benches, Double-tank fryer, Chest freezer',
-    },
-    {
-      date_time: 'Mon, 15 Sep 2026, 8:00 AM – 12:00 PM',
-      booking_date: '2026-09-15',
-      reference_code: 'DD-BK-918',
-      intended_use: 'Artisan Sourdough & Pastry Batching',
-      status: 'completed',
-      payment_status: 'paid',
-      amount: 167.20,
-      duration: '4 hours',
-      team: '2 Persons',
-      equipment: '20L Planetary mixer, Turbofan oven, Bread slicer',
-    },
-    {
-      date_time: 'Fri, 28 Aug 2026, 2:00 PM – 10:00 PM',
-      booking_date: '2026-08-28',
-      reference_code: 'DD-BK-890',
-      intended_use: 'Weekend Market Catering Production',
-      status: 'completed',
-      payment_status: 'paid',
-      amount: 281.60,
-      duration: '8 hours',
-      team: '4 Persons',
-      equipment: 'Full cookline, Tilting bratt pan, Under-counter prep fridges',
-    },
-    {
-      date_time: 'Wed, 12 Aug 2026, 6:00 AM – 10:00 AM',
-      booking_date: '2026-08-12',
-      reference_code: 'DD-BK-855',
-      intended_use: 'Hot Sauce Bottling & Canning Batch',
-      status: 'completed',
-      payment_status: 'paid',
-      amount: 167.20,
-      duration: '4 hours',
-      team: '2 Persons',
-      equipment: '6-burner gas range, Stainless prep line, Food processor',
-    },
-  ];
+  // Recurring slots are arranged with staff; nothing is shown until the server supports them.
+  const recurringSlots: {
+    id: string;
+    title: string;
+    day: string;
+    time: string;
+    startDate: string;
+    status: string;
+    equipment: string;
+    discount: string;
+  }[] = [];
 
-  const invoicesList = [
-    {
-      id: 'INV-001',
-      ref: 'DD-BK-001',
-      date: '19 Oct 2026',
-      dueDate: '21 Oct 2026',
-      description: 'Kitchen Rental DD-BK-001 (Wed 21 Oct, 4h)',
-      amount: 167.20,
-      status: paidInvoices.includes('INV-001') ? 'paid' : 'unpaid',
-    },
-    {
-      id: 'INV-003',
-      ref: 'DD-BK-003',
-      date: '19 Oct 2026',
-      dueDate: '26 Oct 2026',
-      description: 'Kitchen Rental DD-BK-003 (Mon 26 Oct, 4h)',
-      amount: 167.20,
-      status: paidInvoices.includes('INV-003') ? 'paid' : 'unpaid',
-    },
-    {
-      id: 'REC-918',
-      ref: 'DD-BK-918',
-      date: '15 Sep 2026',
-      dueDate: '15 Sep 2026',
-      description: 'Kitchen Booking DD-BK-918 (4h)',
-      amount: 167.20,
-      status: 'paid',
-    },
-    {
-      id: 'REC-890',
-      ref: 'DD-BK-890',
-      date: '28 Aug 2026',
-      dueDate: '28 Aug 2026',
-      description: 'Kitchen Booking DD-BK-890 (8h Tier)',
-      amount: 281.60,
-      status: 'paid',
-    },
-    {
-      id: 'REC-855',
-      ref: 'DD-BK-855',
-      date: '12 Aug 2026',
-      dueDate: '12 Aug 2026',
-      description: 'Kitchen Booking DD-BK-855 (4h)',
-      amount: 167.20,
-      status: 'paid',
-    },
-  ];
-
-  const recurringSlots = [
-    {
-      id: 'REC-SLOT-01',
-      title: 'Weekly Production Night',
-      day: 'Every Wednesday',
-      time: '6:30 PM – 10:30 PM (4h)',
-      startDate: '01 Oct 2026',
-      status: 'active',
-      equipment: 'Combi oven, 6-burner range, 2x prep stations',
-      discount: '10% Tiered Discount Applied',
-    },
-    {
-      id: 'REC-SLOT-02',
-      title: 'Fortnightly Morning Batching',
-      day: 'Every 2nd Monday',
-      time: '10:00 AM – 2:00 PM (4h)',
-      startDate: '12 Oct 2026',
-      status: 'pending_review',
-      equipment: 'Prep benches, Deep fryer, Cold storage bay',
-      discount: 'Standard Rate ($38/hr)',
-    },
-  ];
-
+  /** Payments are made by bank transfer; this opens the instructions for that booking. */
   const handlePayInvoice = (invId: string) => {
-    setPaidInvoices((prev) => [...prev, invId]);
-    alert(`Payment of invoice ${invId} completed successfully! A receipt has been issued.`);
+    const inv = userInvoices.find((i) => i.invoice_number === invId);
+    const booking = liveUserBookings.find((b) => b.reference_code === inv?.booking_reference);
+    setPaymentBooking(
+      booking || { reference_code: inv?.booking_reference || invId, date_time: inv?.service_date_range || '', amount: inv?.amount_payable ?? inv?.total_amount }
+    );
+    setShowPaymentModal(true);
   };
 
   const handleDashboardLogout = () => {
@@ -359,39 +212,34 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
     setShowPaymentModal(true);
   };
 
+  // Customers can't mark their own booking paid. Staff confirm once the transfer arrives.
   const handleConfirmBookingPayment = () => {
     if (!paymentBooking) return;
-    const ref = paymentBooking.reference_code;
-    
-    // Update live bookings state
-    setLiveUserBookings((prev) =>
-      prev.map((item) =>
-        item.reference_code === ref
-          ? { ...item, payment_status: 'paid', status: 'confirmed' }
-          : item
-      )
+    setPaymentSuccessToast(
+      `Thanks! Daily Drop will confirm ${paymentBooking.reference_code} once your transfer arrives (usually within one business day). Your door code will then appear here.`
     );
-
-    setPaidInvoices((prev) => [...prev, `INV-${ref}`, ref]);
-    setPaymentSuccessToast(`Payment recorded for ${ref}! Your slot is officially booked. Keypad PIN: 4892#`);
     setShowPaymentModal(false);
-    setTimeout(() => setPaymentSuccessToast(null), 8000);
+    setTimeout(() => setPaymentSuccessToast(null), 9000);
   };
 
   const downloadCalendarFile = (booking: any) => {
+    // Real booking times in UTC (was hard-coded to 21 Oct 2026 for every booking).
+    const toICS = (iso: string) => new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    const startIso = booking.start_at || `${booking.booking_date}T${booking.start_time}:00+08:00`;
+    const endIso = booking.end_at || new Date(Date.parse(startIso) + (booking.duration_hours || 0) * 3600000).toISOString();
     const icsContent = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
       'PRODID:-//Daily Drop Commercial Kitchen//Booking Calendar//EN',
       'BEGIN:VEVENT',
       `UID:${booking.reference_code}@dailydrop.com.au`,
-      `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}Z`,
-      'DTSTART:20261021T103000Z',
-      'DTEND:20261021T143000Z',
+      `DTSTAMP:${toICS(new Date().toISOString())}`,
+      `DTSTART:${toICS(startIso)}`,
+      `DTEND:${toICS(endIso)}`,
       `SUMMARY:Daily Drop Commercial Kitchen Rental (${booking.reference_code})`,
       `DESCRIPTION:Commercial kitchen reservation for ${booking.intended_use}.`,
       'LOCATION:Unit 1, 1 Lichfield Street, Victoria Park, Perth, WA, 6101',
-      'STATUS:CONFIRMED',
+      `STATUS:${booking.status === 'confirmed' ? 'CONFIRMED' : 'TENTATIVE'}`,
       'END:VEVENT',
       'END:VCALENDAR',
     ].join('\r\n');
@@ -406,12 +254,13 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
   };
 
   // Merge live user bookings with mock templates
-  const combinedBookings = [
-    ...liveUserBookings,
-    ...allBookings.filter((m) => !liveUserBookings.some((l) => l.reference_code === m.reference_code)),
-  ];
+  const combinedBookings = liveUserBookings;
 
-  const primaryBooking = combinedBookings[0] || nextBooking;
+  // Next upcoming active booking (soonest first)
+  const primaryBooking =
+    [...liveUserBookings]
+      .filter((b) => ['pending', 'approved', 'confirmed'].includes(b.status) && (!b.end_at || Date.parse(b.end_at) > Date.now()))
+      .sort((a, b) => Date.parse(a.start_at || a.booking_date) - Date.parse(b.start_at || b.booking_date))[0] || null;
 
   // Filtered bookings for the Bookings Tab
   const filteredBookings = combinedBookings.filter((b) => {
@@ -651,6 +500,9 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
           {/* ========================================================== */}
           {/* TAB 1: DASHBOARD VIEW (Original Dashboard matching screenshot) */}
           {/* ========================================================== */}
+          {loadError && (
+            <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800">{loadError}</div>
+          )}
           {activeNav === 'dashboard' && (
             <>
               {/* Top 4 Stat Cards */}
@@ -733,6 +585,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                   </div>
 
                   {/* Showcase Card */}
+                  {primaryBooking ? (
                   <div className="bg-white rounded-2xl border border-gray-200/90 overflow-hidden shadow-xs">
                     <div className="grid grid-cols-1 sm:grid-cols-12">
                       <div className="sm:col-span-5 relative bg-gray-900 h-52 sm:h-auto overflow-hidden">
@@ -744,7 +597,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                         <div className="absolute top-3 left-3">
                           <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-500 text-white shadow-sm flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
-                            <span>Confirmed</span>
+                            <span>{primaryBooking.status}</span>
                           </span>
                         </div>
                       </div>
@@ -759,6 +612,12 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                               {primaryBooking.payment_status === 'paid' ? 'Paid' : 'Unpaid (Action Req)'}
                             </span>
                           </div>
+                          {primaryBooking.access_code && (
+                            <div className="text-xs mb-1">
+                              Door access code:{' '}
+                              <span className="font-mono font-black text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded">{primaryBooking.access_code}</span>
+                            </div>
+                          )}
 
                           <h4 className="font-bold text-base text-gray-900 leading-tight">
                             {primaryBooking.intended_use}
@@ -820,6 +679,19 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                       </div>
                     </div>
                   </div>
+                  ) : (
+                    <div className="bg-white rounded-2xl border border-gray-200/90 p-6 text-sm text-gray-600 shadow-xs">
+                      <p className="font-bold text-gray-900 mb-1">No upcoming kitchen bookings</p>
+                      <p className="mb-3">Your next confirmed or pending shift will appear here.</p>
+                      <button
+                        type="button"
+                        onClick={onBookClick}
+                        className="px-4 py-2 rounded-xl bg-[#112F21] text-white text-xs font-bold cursor-pointer"
+                      >
+                        Book a kitchen shift
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right 5 Cols: "Book Storage Space" Placeholder & "Book Another Kitchen" & Quick Links */}
@@ -992,7 +864,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 font-medium">
-                      {allBookings.slice(0, 2).map((b) => (
+                      {combinedBookings.slice(0, 2).map((b) => (
                         <tr key={b.reference_code} className="hover:bg-gray-50/50 transition-colors">
                           <td className="px-6 py-4 font-bold text-gray-900">{b.date_time}</td>
                           <td className="px-6 py-4 font-mono text-emerald-800 font-bold">{b.reference_code}</td>
@@ -1109,12 +981,12 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                   : 'bg-amber-50 text-amber-700 border-amber-200'
                               }`}>
-                                {st.payment_status || 'paid'}
+                                {st.payment_status || 'unpaid'}
                               </span>
                             </td>
                             <td className="px-6 py-4 text-right">
                               <span className="px-2.5 py-1 rounded-lg bg-gray-100 font-mono text-xs font-bold text-gray-800 border border-gray-200">
-                                4892#
+                                {st.access_code || 'After payment'}
                               </span>
                             </td>
                           </tr>
@@ -1312,12 +1184,12 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                     : 'bg-amber-50 text-amber-700 border-amber-200'
                                 }`}>
-                                  {st.payment_status || 'paid'}
+                                  {st.payment_status || 'unpaid'}
                                 </span>
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <span className="px-2.5 py-1 rounded-lg bg-gray-100 font-mono text-xs font-bold text-gray-800 border border-gray-200">
-                                  4892#
+                                  {st.access_code || 'After payment'}
                                 </span>
                               </td>
                             </tr>
@@ -1522,13 +1394,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                                 Pay Now
                               </button>
                             ) : (
-                              <button
-                                onClick={() => alert(`Receipt #${inv.id} downloaded.`)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-700 text-xs font-semibold hover:bg-gray-50 transition-colors cursor-pointer"
-                              >
-                                <Download className="w-3.5 h-3.5" />
-                                <span>Receipt</span>
-                              </button>
+                              <span className="text-xs text-gray-500">{inv.status === 'void' ? 'Void' : 'Paid — tax invoice emailed'}</span>
                             )}
                           </td>
                         </tr>
@@ -1730,9 +1596,21 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                   </div>
                 ) : (
                   <form
-                    onSubmit={(e) => {
+                    onSubmit={async (e) => {
                       e.preventDefault();
-                      setSupportSubmitted(true);
+                      try {
+                        await api.submitEnquiry({
+                          full_name: currentUser?.full_name || chefName,
+                          email: currentUser?.email || chefEmail,
+                          phone: currentUser?.phone || chefPhone,
+                          business_name: currentUser?.business_name,
+                          rental_type: `Support: ${supportCategory}`,
+                          message: supportMessage || `Support request (${supportCategory})`,
+                        });
+                        setSupportSubmitted(true);
+                      } catch (err: any) {
+                        alert(err.message || 'Could not send your request. Please call or email us.');
+                      }
                     }}
                     className="space-y-4"
                   >
@@ -1823,6 +1701,9 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                     <p className="text-xs text-gray-500">{businessName}</p>
                   </div>
                 </div>
+                {profileError && (
+                  <span className="text-xs font-bold text-red-700 bg-red-50 px-3 py-1 rounded-full border border-red-200">{profileError}</span>
+                )}
                 {profileSaved && (
                   <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-full border border-emerald-200 flex items-center gap-1">
                     <Check className="w-3.5 h-3.5" />
@@ -1832,10 +1713,23 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
               </div>
 
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
-                  setProfileSaved(true);
-                  setTimeout(() => setProfileSaved(false), 3000);
+                  setProfileError(null);
+                  try {
+                    const updated = await api.updateUserProfile({
+                      full_name: chefName.trim(),
+                      business_name: businessName.trim(),
+                      phone: chefPhone.trim(),
+                      abn: abnNumber.trim(),
+                    });
+                    setCurrentUser(updated);
+                    onUserAuthChange?.(updated);
+                    setProfileSaved(true);
+                    setTimeout(() => setProfileSaved(false), 3000);
+                  } catch (err: any) {
+                    setProfileError(err.message || 'Could not save your profile.');
+                  }
                 }}
                 className="space-y-6"
               >
@@ -1988,6 +1882,25 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
               </div>
             </div>
 
+            {['pending', 'approved'].includes(selectedBookingDetails.status) && selectedBookingDetails.payment_status === 'unpaid' && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!window.confirm(`Cancel booking ${selectedBookingDetails.reference_code}? The time slot will be released.`)) return;
+                  try {
+                    const updated = await api.cancelBooking(selectedBookingDetails.reference_code);
+                    setLiveUserBookings((prev) => prev.map((b) => (b.reference_code === updated.reference_code ? { ...b, status: updated.status } : b)));
+                    setShowDetailsModal(false);
+                  } catch (err: any) {
+                    alert(err.message || 'Could not cancel this booking.');
+                  }
+                }}
+                className="w-full border border-red-200 text-red-700 hover:bg-red-50 py-2 rounded-xl font-bold text-xs cursor-pointer"
+              >
+                Cancel this booking
+              </button>
+            )}
+
             <div className="pt-2 flex gap-3">
               <button
                 onClick={() => downloadCalendarFile(selectedBookingDetails)}
@@ -2039,9 +1952,25 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
               </div>
             ) : (
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
-                  setRecurringSubmitted(true);
+                  const fields = Array.from((e.currentTarget as HTMLFormElement).querySelectorAll('select, input, textarea'))
+                    .map((el) => (el as HTMLInputElement).value)
+                    .filter(Boolean)
+                    .join(' | ');
+                  try {
+                    await api.submitEnquiry({
+                      full_name: currentUser?.full_name || chefName,
+                      email: currentUser?.email || chefEmail,
+                      phone: currentUser?.phone || chefPhone,
+                      business_name: currentUser?.business_name,
+                      rental_type: 'Recurring schedule request',
+                      message: `Recurring schedule request: ${fields}`,
+                    });
+                    setRecurringSubmitted(true);
+                  } catch (err: any) {
+                    alert(err.message || 'Could not send your request. Please call or email us.');
+                  }
                 }}
                 className="space-y-4 text-xs"
               >
@@ -2128,7 +2057,9 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
             <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 text-xs leading-relaxed">
               <p className="font-extrabold text-amber-900 mb-0.5">⚠️ SLOT AWAITING PAYMENT</p>
               <p>
-                Your requested slot is on temporary hold. <strong>You need to pay before the slot is officially booked.</strong> After payment is received and confirmed, your reservation will be finalized and your door access PIN code will be activated.
+                Your requested slot is on temporary hold. <strong>Unpaid holds are released automatically</strong>
+                {paymentBooking.hold_expires_at ? ` after ${new Date(paymentBooking.hold_expires_at).toLocaleString('en-AU', { timeZone: 'Australia/Perth' })} AWST` : ''}. Once
+                Daily Drop confirms your transfer, your booking is confirmed and your door access code appears in this dashboard.
               </p>
             </div>
 
@@ -2142,24 +2073,30 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                 <span className="font-semibold text-gray-800">{paymentBooking.date_time}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-gray-200/60">
-                <span className="text-gray-500">Total Rental Amount:</span>
-                <span className="font-black text-sm text-[#112F21]">${(paymentBooking.amount || 167.2).toFixed(2)} AUD</span>
+                <span className="text-gray-500">Amount to transfer (incl. GST and refundable bond):</span>
+                <span className="font-black text-sm text-[#112F21]">${Number(paymentBooking.amount || 0).toFixed(2)} AUD</span>
               </div>
             </div>
 
             <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2 text-xs">
               <div className="font-bold text-emerald-950">Bank Transfer / PayID Payment Details:</div>
-              <div className="text-gray-700"><strong>Bank:</strong> Commonwealth Bank of Australia</div>
-              <div className="text-gray-700"><strong>Account Name:</strong> Daily Drop Commercial Kitchens Pty Ltd</div>
-              <div className="text-gray-700"><strong>BSB:</strong> 066-123</div>
-              <div className="text-gray-700"><strong>Account Number:</strong> 1234 5678</div>
+              {pay ? (
+                <>
+                  {pay.bank_name && <div className="text-gray-700"><strong>Bank:</strong> {pay.bank_name}</div>}
+                  {pay.account_name && <div className="text-gray-700"><strong>Account Name:</strong> {pay.account_name}</div>}
+                  {pay.bsb && <div className="text-gray-700"><strong>BSB:</strong> {pay.bsb}</div>}
+                  {pay.account_number && <div className="text-gray-700"><strong>Account Number:</strong> {pay.account_number}</div>}
+                  {pay.payid && <div className="text-gray-700"><strong>PayID:</strong> {pay.payid}</div>}
+                </>
+              ) : (
+                <div className="text-gray-700">Payment details are on your emailed tax invoice.</div>
+              )}
               <div className="text-gray-700">
                 <strong>Reference:</strong>{' '}
                 <span className="font-mono font-bold bg-white px-2 py-0.5 rounded border border-emerald-300 text-emerald-900">
                   {paymentBooking.reference_code}
                 </span>
               </div>
-              <div className="text-gray-700"><strong>PayID:</strong> payments@dailydrop.today</div>
             </div>
 
             <div className="pt-2 flex gap-3">
@@ -2167,7 +2104,17 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                 type="button"
                 onClick={() => {
                   navigator.clipboard.writeText(
-                    `Bank: Commonwealth Bank\nAccount: Daily Drop Commercial Kitchens\nBSB: 066-123\nAccount: 1234 5678\nRef: ${paymentBooking.reference_code}\nPayID: payments@dailydrop.today\nAmount: $${(paymentBooking.amount || 167.2).toFixed(2)}`
+                    [
+                      pay?.bank_name && `Bank: ${pay.bank_name}`,
+                      pay?.account_name && `Account: ${pay.account_name}`,
+                      pay?.bsb && `BSB: ${pay.bsb}`,
+                      pay?.account_number && `Account No: ${pay.account_number}`,
+                      pay?.payid && `PayID: ${pay.payid}`,
+                      `Ref: ${paymentBooking.reference_code}`,
+                      `Amount: $${Number(paymentBooking.amount || 0).toFixed(2)}`,
+                    ]
+                      .filter(Boolean)
+                      .join('\n')
                   );
                   setPaymentCopied(true);
                   setTimeout(() => setPaymentCopied(false), 2000);
@@ -2181,7 +2128,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                 onClick={handleConfirmBookingPayment}
                 className="flex-1 py-2.5 rounded-xl bg-[#ED8533] hover:bg-[#d87222] text-white font-bold text-xs cursor-pointer shadow-sm"
               >
-                I Have Paid / Confirm Slot
+                I've sent the transfer
               </button>
             </div>
           </div>

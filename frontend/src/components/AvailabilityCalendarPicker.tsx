@@ -14,7 +14,7 @@ import {
   Lock,
   Layers
 } from 'lucide-react';
-import { api, formatDisplayDate } from '../services/api';
+import { api, formatDisplayDate, perthToday, addDaysToDate } from '../services/api';
 import { DayAvailabilitySummary, SlotInterval } from '../types';
 
 interface AvailabilityCalendarPickerProps {
@@ -41,8 +41,8 @@ export const AvailabilityCalendarPicker: React.FC<AvailabilityCalendarPickerProp
     if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
       return { year: parts[0], month: parts[1] };
     }
-    const d = new Date();
-    return { year: d.getFullYear(), month: d.getMonth() + 1 };
+    const [y, m] = perthToday().split('-').map(Number);
+    return { year: y, month: m };
   };
 
   const initialYM = parseYearMonth(selectedDate);
@@ -127,9 +127,9 @@ export const AvailabilityCalendarPicker: React.FC<AvailabilityCalendarPickerProp
   };
 
   const handleJumpToCurrent = () => {
-    const now = new Date();
-    setViewYear(now.getFullYear());
-    setViewMonth(now.getMonth() + 1);
+    const [y, m] = perthToday().split('-').map(Number);
+    setViewYear(y);
+    setViewMonth(m);
   };
 
   // Month calculation helpers
@@ -255,9 +255,7 @@ export const AvailabilityCalendarPicker: React.FC<AvailabilityCalendarPickerProp
         <button
           type="button"
           onClick={() => {
-            const d = new Date();
-            d.setDate(d.getDate() + 1);
-            onSelectDate(d.toISOString().split('T')[0]);
+            onSelectDate(addDaysToDate(perthToday(), 1));
           }}
           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
         >
@@ -266,9 +264,7 @@ export const AvailabilityCalendarPicker: React.FC<AvailabilityCalendarPickerProp
         <button
           type="button"
           onClick={() => {
-            const d = new Date();
-            d.setDate(d.getDate() + 2);
-            onSelectDate(d.toISOString().split('T')[0]);
+            onSelectDate(addDaysToDate(perthToday(), 2));
           }}
           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
         >
@@ -277,9 +273,9 @@ export const AvailabilityCalendarPicker: React.FC<AvailabilityCalendarPickerProp
         <button
           type="button"
           onClick={() => {
-            const d = new Date();
-            d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7));
-            onSelectDate(d.toISOString().split('T')[0]);
+            const today = perthToday();
+            const dow = new Date(`${today}T00:00:00Z`).getUTCDay();
+            onSelectDate(addDaysToDate(today, (6 - dow + 7) % 7 || 7));
           }}
           className="text-xs px-2.5 py-1 rounded-md bg-white border border-gray-200 text-brand-dark hover:bg-brand-mint hover:border-brand-forest/30 transition-colors cursor-pointer"
         >

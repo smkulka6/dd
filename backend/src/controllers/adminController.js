@@ -1,351 +1,133 @@
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
 const Booking = require('../models/Booking');
-const BookingSlot = require('../models/BookingSlot');
 const BlockedSlot = require('../models/BlockedSlot');
 const KitchenConfig = require('../models/KitchenConfig');
 const Enquiry = require('../models/Enquiry');
 const StorageBooking = require('../models/StorageBooking');
 const Invoice = require('../models/Invoice');
-const { postToGoogleSheet } = require('../services/googleSheetService');
-const { normalizeDate } = require('../utils/dateUtils');
-const { getJwtSecret, generateDoorPin } = require('../config/constants');
+const bookingService = require('../services/bookingService');
+const { toDollars } = require('../utils/money');
+const { perthToday, startOfPerthDay, endOfPerthDay } = require('../utils/perthTime');
+const { asyncHandler, escapeRegExp, notFound, conflict } = require('../utils/httpError');
 
-const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Real numbers from the database (the old dashboard added a hard-coded $400). */
+const getDashboardStats = asyncHandler(async (req, res) => {
+  const today = perthToday();
+  const [byStatus, revenue, hours, todayCount, enquiries, newEnquiries, storageActive, outstanding] = await Promise.all([
+    Booking.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+    Invoice.aggregate([{ $match: { status: 'paid' } }, { $group: { _id: null, inc: { $sum: '$total_inc_gst_cents' }, gst: { $sum: '$gst_cents' } } }]),
+    Booking.aggregate([
+      { $match: { status: { $in: ['pending', 'approved', 'confirmed', 'completed'] } } },
+      { $group: { _id: null, h: { $sum: '$duration_hours' }, pipeline: { $sum: '$total_cents' } } },
+    ]),
+    Booking.countDocuments({
+      status: { $in: ['pending', 'approved', 'confirmed'] },
+      start_at: { $lt: endOfPerthDay(today) },
+      end_at: { $gt: startOfPerthDay(today) },
+    }),
+    Enquiry.countDocuments(),
+    Enquiry.countDocuments({ status: 'new' }),
+    StorageBooking.countDocuments({ status: { $in: ['pending', 'approved', 'confirmed'] }, start_date: { $lte: today }, occupied_until: { $gt: today } }),
+    Invoice.aggregate([{ $match: { status: 'pending' } }, { $group: { _id: null, c: { $sum: '$amount_payable_cents' } } }]),
+  ]);
+  const count = (s) => byStatus.find((x) => x._id === s)?.n || 0;
+  const total = byStatus.reduce((s, x) => s + x.n, 0);
+  const paid = toDollars(revenue[0]?.inc || 0);
+  res.json({
+    total_bookings: total,
+    pending_requests: count('pending'),
+    pending_bookings: count('pending'),
+    pending_approvals: count('pending'),
+    approved_count: count('approved'),
+    confirmed_count: count('confirmed'),
+    confirmed_bookings: count('confirmed'),
+    completed_count: count('completed'),
+    cancelled_count: count('cancelled') + count('rejected') + count('expired'),
+    total_confirmed_revenue: paid,
+    total_revenue: paid,
+    total_revenue_aud: paid,
+    gst_collected: toDollars(revenue[0]?.gst || 0),
+    pipeline_revenue: toDollars(hours[0]?.pipeline || 0),
+    total_hours_booked: hours[0]?.h || 0,
+    outstanding_amount: toDollars(outstanding[0]?.c || 0),
+    today_shifts: todayCount,
+    total_enquiries: enquiries,
+    new_enquiries: newEnquiries,
+    active_enquiries: newEnquiries,
+    storage_bays_occupied: storageActive,
+  });
+});
+
+const getAdminBookings = asyncHandler(async (req, res) => {
+  const { status, search, limit } = req.validatedQuery;
+  const filter = {};
+  if (status && status !== 'all') filter.status = status === 'pending_approval' ? 'pending' : status;
+  if (search) {
+    const rx = new RegExp(escapeRegExp(search.trim()), 'i');
+    filter.$or = [{ full_name: rx }, { email: rx }, { reference_code: rx }, { business_name: rx }];
+  }
+  const list = await Booking.find(filter).select('+access_code').sort({ start_at: -1 }).limit(limit);
+  res.json(list.map((b) => b.toPublicShape({ admin: true, includeAccessCode: true })));
+});
+
+const updateBookingStatus = asyncHandler(async (req, res) => {
+  const b = await bookingService.adminUpdateBooking(req.user, req.params.id, req.body);
+  res.json(b.toPublicShape({ admin: true, includeAccessCode: true }));
+});
 
 /**
- * Staff Admin Login (Authenticated strictly against MongoDB User records)
- * @route POST /api/admin/login
+ * "Delete" from the admin panel cancels the booking and frees its slots.
+ * Financial records are never hard-deleted once an invoice exists.
  */
-const adminLogin = async (req, res, next) => {
-  try {
-    const { username, password } = req.body;
-    const rawIdentifier = String(username || '').trim().toLowerCase();
-
-    if (!rawIdentifier || !password) {
-      return res.status(400).json({ success: false, error: 'Username/email and password are required.' });
-    }
-
-    const emailLookup = rawIdentifier === 'admin' ? 'admin@dailydrop.today' : rawIdentifier;
-    const user = await User.findOne({
-      email: emailLookup,
-      role: { $in: ['staff_admin', 'super_admin'] },
-    });
-
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ success: false, error: 'Invalid admin credentials' });
-    }
-
-    const token = jwt.sign({ id: user._id, role: user.role }, getJwtSecret(), { expiresIn: '7d' });
-    return res.json({
-      access_token: token,
-      token_type: 'bearer',
-      user: user.toSafeJSON(),
-    });
-  } catch (err) {
-    next(err);
+const deleteBooking = asyncHandler(async (req, res) => {
+  const b = await bookingService.findBookingByIdOrRef(req.params.id);
+  if (!b) throw notFound('Booking not found.');
+  if (['pending', 'approved', 'confirmed'].includes(b.status)) {
+    const updated = await bookingService.adminUpdateBooking(req.user, req.params.id, { status: 'cancelled' });
+    return res.json({ success: true, cancelled: true, booking: updated.toPublicShape({ admin: true }) });
   }
-};
+  if (b.invoice) throw conflict('This booking has an invoice and is kept for tax records.');
+  await bookingService.withTxn(async (session) => {
+    await bookingService.releaseAndVoid(b, 'Deleted', session);
+    await Booking.deleteOne({ _id: b._id }, { session });
+  });
+  return res.json({ success: true, deleted: true });
+});
 
-/**
- * Super Admin Director Login (Authenticated strictly against MongoDB User records)
- * @route POST /api/superadmin/login
- */
-const superAdminLogin = async (req, res, next) => {
-  try {
-    const { username, password } = req.body;
-    const rawIdentifier = String(username || '').trim().toLowerCase();
+const getBlockedSlots = asyncHandler(async (req, res) => {
+  const list = await BlockedSlot.find({ end_at: { $gte: new Date(Date.now() - 90 * 86400000) } }).sort({ start_at: 1 });
+  res.json(list.map((b) => b.toPublicShape()));
+});
 
-    if (!rawIdentifier || !password) {
-      return res.status(400).json({ success: false, error: 'Username/email and password are required.' });
-    }
+const createBlockedSlot = asyncHandler(async (req, res) => {
+  const block = await bookingService.createBlock(req.user, req.body);
+  res.status(201).json(block.toPublicShape());
+});
 
-    const emailLookup =
-      rawIdentifier === 'superadmin' || rawIdentifier === 'director'
-        ? 'director@dailydrop.today'
-        : rawIdentifier;
+const deleteBlockedSlot = asyncHandler(async (req, res) => {
+  await bookingService.deleteBlock(req.params.id);
+  res.json({ success: true });
+});
 
-    const user = await User.findOne({
-      email: emailLookup,
-      role: 'super_admin',
-    });
+const updateConfig = asyncHandler(async (req, res) => {
+  const config = await KitchenConfig.get();
+  // req.body has already been reduced to a whitelist by the validator.
+  config.set(req.body);
+  await config.save();
+  res.json(config.toObject({ versionKey: false }));
+});
 
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ success: false, error: 'Invalid Super Admin credentials' });
-    }
+const getEnquiries = asyncHandler(async (req, res) => {
+  const list = await Enquiry.find().sort({ createdAt: -1 }).limit(500);
+  res.json(list.map((e) => e.toPublicShape()));
+});
 
-    const token = jwt.sign({ id: user._id, role: user.role }, getJwtSecret(), { expiresIn: '7d' });
-    return res.json({
-      access_token: token,
-      token_type: 'bearer',
-      user: user.toSafeJSON(),
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Dashboard Stats (100% real MongoDB aggregations — zero fabricated numbers)
- * @route GET /api/admin/dashboard-stats
- */
-const getDashboardStats = async (req, res, next) => {
-  try {
-    const totalBookings = await Booking.countDocuments();
-    const pendingBookings = await Booking.countDocuments({ status: 'pending' });
-    const approvedBookings = await Booking.countDocuments({ status: { $in: ['approved', 'confirmed'] } });
-
-    const paidBookings = await Booking.find({ payment_status: 'paid' }).select('total_price').lean();
-    const paidStorages = await StorageBooking.find({ payment_status: 'paid' }).select('total_price').lean();
-
-    const bookingRevenue = paidBookings.reduce((sum, b) => sum + (Number(b.total_price) || 0), 0);
-    const storageRevenue = paidStorages.reduce((sum, s) => sum + (Number(s.total_price) || 0), 0);
-    const totalRevenue = Number((bookingRevenue + storageRevenue).toFixed(2));
-
-    const todayStr = normalizeDate(new Date());
-    const todayBookings = await Booking.countDocuments({ booking_date: todayStr });
-    const activeEnquiries = await Enquiry.countDocuments({ status: 'new' });
-    const storageOccupied = await StorageBooking.countDocuments({ status: { $in: ['confirmed', 'approved'] } });
-
-    return res.json({
-      total_bookings: totalBookings,
-      pending_approvals: pendingBookings,
-      confirmed_bookings: approvedBookings,
-      total_revenue: totalRevenue,
-      today_shifts: todayBookings,
-      active_enquiries: activeEnquiries,
-      storage_bays_occupied: storageOccupied,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Get Filtered Bookings for Admin
- * @route GET /api/admin/bookings
- */
-const getAdminBookings = async (req, res, next) => {
-  try {
-    const { status, search, limit = 50 } = req.query;
-    const filter = {};
-
-    if (status && status !== 'all') {
-      filter.status = String(status);
-    }
-
-    if (search) {
-      const q = escapeRegex(String(search).trim());
-      if (q) {
-        const regex = new RegExp(q, 'i');
-        filter.$or = [
-          { full_name: regex },
-          { email: regex },
-          { reference_code: regex },
-          { business_name: regex },
-        ];
-      }
-    }
-
-    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    const bookings = await Booking.find(filter)
-      .sort({ booking_date: -1, createdAt: -1 })
-      .limit(parsedLimit);
-
-    return res.json(bookings);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Update Booking Status (Approve, Reject, Confirm, Complete)
- * Releases BookingSlot locks when cancelled/rejected; issues unique PIN when paid & confirmed.
- * @route PATCH /api/admin/bookings/:id/status
- */
-const updateBookingStatus = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status, admin_notes, payment_status } = req.body;
-
-    const query = id.startsWith('DD-BK-') ? { reference_code: id } : { _id: id };
-    const booking = await Booking.findOne(query);
-
-    if (!booking) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    if (status) booking.status = status;
-    if (admin_notes !== undefined) booking.admin_notes = admin_notes;
-    if (payment_status) {
-      booking.payment_status = payment_status;
-      if (payment_status === 'paid' && !booking.paid_at) {
-        booking.paid_at = new Date();
-      }
-    }
-
-    // Issue unique per-booking PIN only when both confirmed and paid
-    if (booking.status === 'confirmed' && booking.payment_status === 'paid' && !booking.door_access_pin) {
-      const pin = generateDoorPin();
-      booking.door_access_pin = pin;
-      booking.door_pin_code = pin;
-    }
-
-    await booking.save();
-
-    // Release slot locks if cancelled or rejected
-    if (booking.status === 'cancelled' || booking.status === 'rejected') {
-      await BookingSlot.deleteMany({ booking_id: booking._id });
-      await Invoice.updateOne(
-        { booking_reference: booking.reference_code },
-        { $set: { status: 'void' } }
-      );
-    } else if (booking.payment_status === 'paid') {
-      await Invoice.updateOne(
-        { booking_reference: booking.reference_code },
-        { $set: { status: 'paid', paid_at: booking.paid_at || new Date() } }
-      );
-    }
-
-    postToGoogleSheet({
-      action: 'update_booking_status',
-      reference_code: booking.reference_code,
-      status: booking.status,
-      admin_notes: booking.admin_notes,
-    }).catch(() => {});
-
-    return res.json({ success: true, booking });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Delete Booking & Release its Slot Locks
- * @route DELETE /api/admin/bookings/:id
- */
-const deleteBooking = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const query = id.startsWith('DD-BK-') ? { reference_code: id } : { _id: id };
-    const booking = await Booking.findOneAndDelete(query);
-    if (booking) {
-      await BookingSlot.deleteMany({ booking_id: booking._id });
-      await Invoice.updateOne(
-        { booking_reference: booking.reference_code },
-        { $set: { status: 'void' } }
-      );
-    }
-    return res.json({ success: true, message: 'Booking deleted successfully' });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Blocked Slots Management
- */
-const getBlockedSlots = async (req, res, next) => {
-  try {
-    const slots = await BlockedSlot.find().sort({ block_date: 1 });
-    return res.json(slots);
-  } catch (err) {
-    next(err);
-  }
-};
-
-const createBlockedSlot = async (req, res, next) => {
-  try {
-    const { block_date, start_time, end_time, reason } = req.body;
-    const cleanDate = normalizeDate(block_date);
-    if (!cleanDate) {
-      return res.status(400).json({ success: false, error: 'Valid block_date (YYYY-MM-DD) is required.' });
-    }
-    const slot = await BlockedSlot.create({
-      block_date: cleanDate,
-      start_time: start_time || '00:00',
-      end_time: end_time || '23:59',
-      reason: reason || 'Facility Sanitization & Deep Clean',
-    });
-    return res.status(201).json(slot);
-  } catch (err) {
-    next(err);
-  }
-};
-
-const deleteBlockedSlot = async (req, res, next) => {
-  try {
-    await BlockedSlot.findByIdAndDelete(req.params.id);
-    return res.json({ success: true, message: 'Blocked slot deleted' });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Update Kitchen Config (strictly whitelisted fields)
- */
-const updateConfig = async (req, res, next) => {
-  try {
-    const allowedFields = [
-      'hourly_rental_rate',
-      'min_rental_hours',
-      'operating_hours_start',
-      'operating_hours_end',
-      'cleaning_fee',
-      'security_deposit',
-      'facility_name',
-      'facility_address',
-      'kitchen_phone',
-      'kitchen_email',
-    ];
-
-    const updates = {};
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        updates[field] = req.body[field];
-      }
-    }
-
-    let config = await KitchenConfig.findOne();
-    if (!config) {
-      config = new KitchenConfig(updates);
-    } else {
-      Object.assign(config, updates);
-    }
-    await config.save();
-    return res.json(config);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * Enquiries Management
- */
-const getEnquiries = async (req, res, next) => {
-  try {
-    const enquiries = await Enquiry.find().sort({ createdAt: -1 });
-    return res.json(enquiries);
-  } catch (err) {
-    next(err);
-  }
-};
-
-const updateEnquiryStatus = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const status = req.query.status_val || req.body.status;
-    const enquiry = await Enquiry.findByIdAndUpdate(id, { status }, { new: true });
-    return res.json({ success: true, enquiry });
-  } catch (err) {
-    next(err);
-  }
-};
+const updateEnquiryStatus = asyncHandler(async (req, res) => {
+  const enquiry = await Enquiry.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true, runValidators: true });
+  if (!enquiry) throw notFound('Enquiry not found.');
+  res.json({ success: true, enquiry: enquiry.toPublicShape() });
+});
 
 module.exports = {
-  adminLogin,
-  superAdminLogin,
   getDashboardStats,
   getAdminBookings,
   updateBookingStatus,

@@ -39,8 +39,8 @@ import {
   Eye,
   Key
 } from 'lucide-react';
-import { Invoice, InvoiceStatus, AIRiskLevel, KitchenConfig } from '../types';
-import { api } from '../services/api';
+import { Invoice, InvoiceStatus, AIRiskLevel, KitchenConfig, StorageBooking } from '../types';
+import { api, formatDisplayDate } from '../services/api';
 import { geminiService } from '../services/geminiService';
 import { Images } from '../assets/images';
 
@@ -56,7 +56,19 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   onGoToCustomerPortal
 }) => {
   // Authentication State for Super Admin (Independent from regular staff admin)
-  const [token, setToken] = useState<string | null>(() => api.getSuperAdminToken() || localStorage.getItem('dd_superadmin_token'));
+  const [token, setToken] = useState<string | null>(() => api.getSuperAdminToken());
+  const [config, setConfig] = useState<KitchenConfig | null>(null);
+  const [storageList, setStorageList] = useState<StorageBooking[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    api.getConfig().then(setConfig).catch(() => setConfig(null));
+    const onExpired = (e: Event) => {
+      if ((e as CustomEvent).detail?.scope === 'superadmin') setToken(null);
+    };
+    window.addEventListener('dd:auth-expired', onExpired);
+    return () => window.removeEventListener('dd:auth-expired', onExpired);
+  }, []);
+  const pay = config?.payment_details || null;
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -114,8 +126,6 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const [aiIsThinking, setAiIsThinking] = useState(false);
   const [aiModelUsed, setAiModelUsed] = useState<string | null>(null);
   const [aiErrorNote, setAiErrorNote] = useState<string | null>(null);
-  const [apiKeyInput, setApiKeyInput] = useState(geminiService.getApiKey());
-  const [apiKeySavedNotice, setApiKeySavedNotice] = useState(false);
 
   // Modals State
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
@@ -132,8 +142,8 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const [newInvEmail, setNewInvEmail] = useState('');
   const [newInvPhone, setNewInvPhone] = useState('+61 ');
   const [newInvType, setNewInvType] = useState<'kitchen_rental' | 'storage_lease' | 'custom'>('kitchen_rental');
-  const [newInvAmount, setNewInvAmount] = useState('167.20');
-  const [newInvDeposit, setNewInvDeposit] = useState('750.00');
+  const [newInvAmount, setNewInvAmount] = useState('');
+  const [newInvDeposit, setNewInvDeposit] = useState('');
   const [newInvDesc, setNewInvDesc] = useState('Commercial Kitchen Shift Hire & Facility Access');
   const [creatingInvoice, setCreatingInvoice] = useState(false);
 
@@ -141,10 +151,12 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const loadInvoices = async () => {
     setLoadingInvoices(true);
     try {
-      const data = await api.getInvoices();
+      setLoadError(null);
+      const [data, storage] = await Promise.all([api.getInvoices(), api.getStorageBookings()]);
       setInvoices(data);
-    } catch (err) {
-      console.warn('Error loading invoices:', err);
+      setStorageList(storage);
+    } catch (err: any) {
+      setLoadError(err.message || 'Could not load invoices from the server.');
     } finally {
       setLoadingInvoices(false);
     }
@@ -186,65 +198,42 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
       const urgentCount = freshInvoices.filter(
         (i) => i.ai_risk_level === 'critical' || i.ai_risk_level === 'high' || i.status === 'overdue'
       ).length;
-      setAuditToast(
-        `⚡ Live Audit Complete: ${freshInvoices.length} tenant records synchronized from Google Sheets & facility database. ${urgentCount} booking(s) flagged for attention.`
-      );
-    } catch {
-      setAuditToast('⚡ Live Audit Complete: Records refreshed.');
+      setAuditToast(`Refreshed ${freshInvoices.length} invoice(s) from the database. ${urgentCount} need attention.`);
+    } catch (err: any) {
+      setAuditToast(err.message || 'Could not refresh invoices.');
     } finally {
       setIsAuditing(false);
       setTimeout(() => setAuditToast(null), 7000);
     }
   };
 
-  // Mark Paid / Reconcile
+  // Mark Paid: records the payment on the invoice and its booking (which confirms it and issues a door code)
   const handleMarkPaid = async (inv: Invoice) => {
+    const reference = window.prompt(
+      `Record payment of $${(inv.amount_payable ?? inv.total_amount).toFixed(2)} for ${inv.invoice_number}.\nEnter the bank / PayID transaction reference:`
+    );
+    if (reference === null) return;
     try {
-      await api.updateInvoiceStatus(inv.id, 'paid', 'PayID Direct Bank Transfer', 'Reconciled via Super Admin Executive Panel');
-      setInvoices((prev) =>
-        prev.map((i) =>
-          i.id === inv.id
-            ? {
-                ...i,
-                status: 'paid',
-                reconciled_by_ai: true,
-                ai_risk_level: 'low',
-                ai_risk_reason: 'Payment verified and reconciled by Super Admin.',
-                paid_at: new Date().toISOString()
-              }
-            : i
-        )
-      );
-      setAuditToast(`✓ Invoice ${inv.invoice_number} marked as PAID. Door PIN code activated for tenant.`);
+      const updated = await api.updateInvoiceStatus(inv.id, 'paid', 'Bank transfer / PayID', undefined, reference.trim());
+      setInvoices((prev) => prev.map((i) => (i.id === inv.id ? updated : i)));
+      setAuditToast(`✓ Invoice ${inv.invoice_number} marked paid. The customer can now see their door code in their dashboard.`);
       setTimeout(() => setAuditToast(null), 5000);
-    } catch (err) {
-      alert('Failed to update invoice status');
+    } catch (err: any) {
+      alert(err.message || 'Failed to update invoice status');
     }
   };
 
-  // Void / Release Kitchen Slot
+  // Void an unpaid invoice (cancels the booking and releases the slot)
   const handleVoidInvoice = async (inv: Invoice) => {
-    if (!window.confirm(`Release slot and void invoice ${inv.invoice_number}? This will free up the kitchen station/storage bay for other waiting bookings.`)) {
-      return;
-    }
+    const reason = window.prompt(`Void ${inv.invoice_number}? This cancels the booking and frees the slot.\nReason:`, 'Payment not received');
+    if (reason === null) return;
     try {
-      await api.updateInvoiceStatus(inv.id, 'void', undefined, 'Voided by Super Admin due to unconfirmed payment.');
-      setInvoices((prev) =>
-        prev.map((i) =>
-          i.id === inv.id
-            ? {
-                ...i,
-                status: 'void',
-                ai_risk_level: 'low',
-                ai_risk_reason: 'Invoice voided. Kitchen slot released.'
-              }
-            : i
-        )
-      );
-      setAuditToast(`✓ Invoice ${inv.invoice_number} voided. Kitchen slot released in real-time.`);
+      const updated = await api.updateInvoiceStatus(inv.id, 'void', undefined, reason.trim() || 'Voided by admin');
+      setInvoices((prev) => prev.map((i) => (i.id === inv.id ? updated : i)));
+      setAuditToast(`✓ Invoice ${inv.invoice_number} voided and the slot released.`);
       setTimeout(() => setAuditToast(null), 5000);
-    } catch (err) {
-      alert('Failed to void invoice');
+    } catch (err: any) {
+      alert(err.message || 'Failed to void invoice');
     }
   };
 
@@ -265,23 +254,15 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
     try {
       const res = await geminiService.queryInvoiceCopilot(query, invoices);
       setAiAnswer(res.answer);
-      setAiModelUsed(res.isLiveGemini ? (res.modelUsed || 'Google Gemini 2.5 Flash') : 'Commercial Watchdog Engine');
+      setAiModelUsed(res.modelUsed || (res.isLiveGemini ? 'Google Gemini' : 'Built-in rules (no AI)'));
       if (res.errorNote) {
         setAiErrorNote(res.errorNote);
       }
     } catch (err: any) {
-      setAiAnswer('Unable to query AI copilot at this moment. Please verify your connection.');
+      setAiAnswer(err.message || 'The assistant is unavailable right now.');
     } finally {
       setAiIsThinking(false);
     }
-  };
-
-  // Update Gemini Key
-  const handleSaveApiKey = (e: React.FormEvent) => {
-    e.preventDefault();
-    geminiService.setApiKey(apiKeyInput);
-    setApiKeySavedNotice(true);
-    setTimeout(() => setApiKeySavedNotice(false), 3000);
   };
 
   // Filtered Invoices
@@ -312,7 +293,7 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const totalInvoiced = useMemo(() => invoices.reduce((sum, i) => sum + (i.status !== 'void' ? i.total_amount : 0), 0), [invoices]);
   const totalPaidRevenue = useMemo(() => invoices.filter((i) => i.status === 'paid').reduce((sum, i) => sum + i.total_amount, 0), [invoices]);
   const totalPending = useMemo(() => invoices.filter((i) => i.status === 'pending' || i.status === 'overdue').reduce((sum, i) => sum + i.total_amount, 0), [invoices]);
-  const totalBondsHeld = useMemo(() => invoices.filter((i) => i.status === 'paid').reduce((sum, i) => sum + i.security_deposit, 0), [invoices]) || 950.00;
+  const totalBondsHeld = useMemo(() => invoices.filter((i) => i.status === 'paid').reduce((sum, i) => sum + (i.security_deposit || 0), 0), [invoices]);
   const highRiskList = useMemo(() => invoices.filter((i) => i.ai_risk_level === 'high' || i.ai_risk_level === 'critical' || i.status === 'overdue'), [invoices]);
 
   // Create Manual Invoice Handler
@@ -325,12 +306,11 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
         customer_name: newInvName.trim(),
         business_name: newInvBusiness.trim() || undefined,
         abn: newInvAbn.trim() || undefined,
-        email: newInvEmail.trim() || 'accounting@dailydrop.today',
-        phone: newInvPhone.trim() || '+61 412 345 678',
-        booking_type: newInvType,
-        total_amount: parseFloat(newInvAmount) || 167.20,
+        email: newInvEmail.trim() || undefined,
+        phone: newInvPhone.trim() && newInvPhone.trim() !== '+61' ? newInvPhone.trim() : undefined,
+        amount_ex_gst: parseFloat(newInvAmount) || 0,
         security_deposit: parseFloat(newInvDeposit) || 0,
-        description: newInvDesc.trim() || 'Commercial Kitchen Shift Hire'
+        description: `${newInvType === 'storage_lease' ? 'Storage' : newInvType === 'custom' ? 'Event hire' : 'Kitchen hire'}: ${newInvDesc.trim() || 'Commercial kitchen services'}`,
       });
       setInvoices([created, ...invoices]);
       setShowCreateModal(false);
@@ -340,8 +320,8 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
       setNewInvBusiness('');
       setNewInvAbn('');
       setNewInvEmail('');
-    } catch (err) {
-      alert('Failed to generate manual invoice');
+    } catch (err: any) {
+      alert(err.message || 'Failed to create invoice');
     } finally {
       setCreatingInvoice(false);
     }
@@ -538,7 +518,7 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
               }`}
             >
               <ShieldCheck className="w-4 h-4 text-[#ED8533]" />
-              <span>Bonds & Security Escrow ($750 / $200)</span>
+              <span>Security bonds</span>
             </button>
 
             <button
@@ -584,6 +564,15 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
           </div>
         )}
 
+        {loadError && (
+          <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex justify-between gap-3">
+            <span>{loadError}</span>
+            <button type="button" onClick={loadInvoices} className="font-bold underline cursor-pointer">
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* ========================================================
             TAB 1: INVOICES & FINANCIAL AI MONITOR
            ======================================================== */}
@@ -608,7 +597,7 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                   className="bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-300 px-3.5 py-2 rounded-xl font-bold text-xs shadow-2xs transition-all flex items-center gap-2 cursor-pointer active:scale-95 disabled:opacity-75"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 text-[#ED8533] ${isAuditing ? 'animate-spin' : ''}`} />
-                  <span>{isAuditing ? 'Auditing...' : 'Run 1-Click AI Audit'}</span>
+                  <span>{isAuditing ? 'Refreshing...' : 'Refresh invoices'}</span>
                 </button>
 
                 <button
@@ -678,11 +667,11 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                 </div>
               </div>
 
-              {/* Card 5: Security Bonds in Escrow (Ice Blue Tint) */}
+              {/* Card 5: Bonds received (Ice Blue Tint) */}
               <div className="bg-[#E8F0FE] text-blue-950 rounded-2xl p-4 sm:p-5 border-2 border-[#90CAF9] shadow-xs space-y-1">
                 <div className="text-[10px] font-black uppercase tracking-wider text-blue-800 flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5 text-blue-700" />
-                  <span>Security Bonds in Escrow</span>
+                  <span>Bonds received</span>
                 </div>
                 <div className="text-2xl font-black font-mono tracking-tight text-blue-950 mt-1">
                   ${totalBondsHeld.toFixed(2)} AUD
@@ -784,10 +773,10 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                     🚨 Who owes money?
                   </button>
                   <button
-                    onClick={() => handleAiAsk('How much bond money is currently held in escrow?')}
+                    onClick={() => handleAiAsk('How much bond money is currently held?')}
                     className="px-2.5 py-1 rounded-lg bg-blue-100/70 text-blue-800 hover:bg-blue-100 text-[11px] font-semibold transition-colors cursor-pointer"
                   >
-                    🛡️ Escrow Bonds ($950)
+                    🛡️ Bonds held
                   </button>
                   <button
                     onClick={() => handleAiAsk('Show me storage bay leases')}
@@ -909,9 +898,9 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                       <th className="py-3 px-3.5">Tenant / Business</th>
                       <th className="py-3 px-3.5">Rental Category</th>
                       <th className="py-3 px-3.5">Rental Fee</th>
-                      <th className="py-3 px-3.5">Bond (Escrow)</th>
+                      <th className="py-3 px-3.5">Bond</th>
                       <th className="py-3 px-3.5">Payment Status</th>
-                      <th className="py-3 px-3.5">AI Watchdog</th>
+                      <th className="py-3 px-3.5">Payment risk (rules)</th>
                       <th className="py-3 px-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -1076,291 +1065,190 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
             <div className="bg-white rounded-2xl p-6 sm:p-8 border border-gray-300 shadow-sm space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-200">
                 <div>
-                  <h2 className="text-xl font-black text-gray-900">Tenant Security Bonds in Escrow</h2>
+                  <h2 className="text-xl font-black text-gray-900">Refundable Security Bonds</h2>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    Refundable security deposits held for equipment protection and kitchen cleanliness.
+                    Bonds received on paid invoices. They are held as security (not GST-able unless forfeited) and refunded
+                    after the post-shift inspection by bank transfer.
                   </p>
                 </div>
-                <div className="text-right bg-blue-50 border border-blue-200 p-3 rounded-xl">
-                  <div className="text-[10px] text-blue-800 font-bold uppercase">Total Escrow Balance</div>
+                <div className="p-4 rounded-2xl bg-blue-50 border border-blue-200 text-right">
+                  <div className="text-[10px] text-blue-800 font-bold uppercase">Total bonds received</div>
                   <div className="text-2xl font-black text-blue-950 font-mono">${totalBondsHeld.toFixed(2)} AUD</div>
                 </div>
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 rounded-xl bg-[#F0F5F1] border-2 border-[#81C784] space-y-1.5">
-                  <div className="font-black text-xs text-emerald-900 uppercase">Kitchen Shift Bond</div>
-                  <div className="text-2xl font-black text-emerald-950 font-mono">$750.00 AUD</div>
-                  <p className="text-[11px] text-gray-600">
-                    Collected prior to shift start. Covers combi oven, tilting bratt pan, fryers, and grease traps.
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-xl bg-[#E8F0FE] border-2 border-[#90CAF9] space-y-1.5">
-                  <div className="font-black text-xs text-blue-900 uppercase">Storage Bay Bond</div>
-                  <div className="text-2xl font-black text-blue-950 font-mono">$200.00 AUD</div>
-                  <p className="text-[11px] text-gray-600">
-                    Held for dry goods storage cages and cold room shelving bays during the active lease term.
-                  </p>
-                </div>
-              </div>
-
-              <div className="pt-2">
-                <h3 className="text-xs font-bold text-gray-800 mb-2 uppercase tracking-wider">
-                  Active Escrow Ledger:
-                </h3>
-                <div className="overflow-x-auto rounded-xl border border-gray-300">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-[#E5ECE7] text-[10px] uppercase font-bold text-gray-800">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-100 text-[10px] uppercase font-bold text-gray-600">
+                    <tr>
+                      <th className="py-2.5 px-4">Customer</th>
+                      <th className="py-2.5 px-4">Booking</th>
+                      <th className="py-2.5 px-4">Invoice</th>
+                      <th className="py-2.5 px-4 text-right">Bond</th>
+                      <th className="py-2.5 px-4">Paid</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {invoices.filter((i) => i.status === 'paid' && (i.security_deposit || 0) > 0).length === 0 ? (
                       <tr>
-                        <th className="py-2.5 px-4">Tenant</th>
-                        <th className="py-2.5 px-4">Service</th>
-                        <th className="py-2.5 px-4">Bond Amount</th>
-                        <th className="py-2.5 px-4">Escrow Status</th>
-                        <th className="py-2.5 px-4">Inspection Checklist</th>
-                        <th className="py-2.5 px-4 text-right">Action</th>
+                        <td colSpan={5} className="py-6 px-4 text-center text-gray-500">No bonds received yet.</td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200">
-                      <tr className="hover:bg-gray-50 bg-white">
-                        <td className="py-3 px-4 font-bold">Chef Michael Davies (Perth Catering Co.)</td>
-                        <td className="py-3 px-4 text-gray-600">Commercial Kitchen Shift (DD-BK-001)</td>
-                        <td className="py-3 px-4 font-mono font-bold text-blue-900">$750.00 AUD</td>
-                        <td className="py-3 px-4">
-                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-300">
-                            Held in Escrow
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-[11px] text-gray-600">
-                          Combi oven cleaned · Grease traps clear
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            onClick={() => alert('Inspection verified. $750.00 bond release initiated to Michael Davies via PayID.')}
-                            className="bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer"
-                          >
-                            Approve Refund
-                          </button>
-                        </td>
-                      </tr>
-                      <tr className="hover:bg-gray-50 bg-[#F9FAF9]">
-                        <td className="py-3 px-4 font-bold">ABC Catering Pty Ltd</td>
-                        <td className="py-3 px-4 text-gray-600">Cold Room Storage Bay B</td>
-                        <td className="py-3 px-4 font-mono font-bold text-blue-900">$200.00 AUD</td>
-                        <td className="py-3 px-4">
-                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-300">
-                            Held in Escrow
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-[11px] text-gray-600">
-                          Active Monthly Storage Lease
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <span className="text-xs text-gray-400 font-medium">Active Lease</span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
+                    ) : (
+                      invoices
+                        .filter((i) => i.status === 'paid' && (i.security_deposit || 0) > 0)
+                        .map((i) => (
+                          <tr key={i.id}>
+                            <td className="py-3 px-4 font-bold">
+                              {i.customer_name}
+                              {i.business_name ? ` (${i.business_name})` : ''}
+                            </td>
+                            <td className="py-3 px-4 font-mono">{i.booking_reference || '—'}</td>
+                            <td className="py-3 px-4 font-mono">{i.invoice_number}</td>
+                            <td className="py-3 px-4 text-right font-mono font-bold">${(i.security_deposit || 0).toFixed(2)}</td>
+                            <td className="py-3 px-4">{i.paid_at ? formatDisplayDate(i.paid_at) : '—'}</td>
+                          </tr>
+                        ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
         )}
 
         {/* ========================================================
-            TAB 3: STORAGE BAY REVENUE
+            TAB 3: STORAGE
            ======================================================== */}
         {activeTab === 'storage' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl p-6 sm:p-8 border border-gray-300 shadow-sm space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-200">
-                <div>
-                  <h2 className="text-xl font-black text-gray-900">Commercial Storage Bays (Max 2 Bays)</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    Monthly recurring revenue from dry storage cage and walk-in cold room facilities.
-                  </p>
-                </div>
-                <div className="text-right bg-emerald-50 border border-emerald-300 p-3 rounded-xl">
-                  <div className="text-[10px] text-emerald-800 font-bold uppercase">Monthly Storage Income</div>
-                  <div className="text-2xl font-black text-emerald-900 font-mono">$400.00 AUD / mo</div>
-                </div>
+              <div className="pb-4 border-b border-gray-200">
+                <h2 className="text-xl font-black text-gray-900">Storage Bay Leases</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {config?.storage_bay_count ?? 2} bays. Capacity is enforced by the server; prices are GST-inclusive.
+                </p>
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {/* Bay 1 */}
-                <div className="border-2 border-emerald-300 rounded-2xl p-5 bg-[#F0F7F1] space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-black uppercase tracking-wider text-emerald-900">
-                      Storage Bay 1 · Dry Storage Unit A
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-emerald-700 text-white">
-                      OCCUPIED
-                    </span>
-                  </div>
-                  <div className="text-2xl font-black text-gray-900 font-mono">$150.00 AUD <span className="text-xs font-normal text-gray-500">/ month</span></div>
-                  <div className="text-xs space-y-1 text-gray-700 pt-1 border-t border-emerald-200">
-                    <div><b>Tenant:</b> Chef Michael Davies (Perth Catering Co.)</div>
-                    <div><b>Lease Term:</b> Monthly Auto-Renew</div>
-                    <div><b>Security Deposit:</b> $200.00 (Held in Escrow)</div>
-                    <div><b>Status:</b> <span className="text-emerald-800 font-bold">Current & Paid</span></div>
-                  </div>
-                </div>
-
-                {/* Bay 2 */}
-                <div className="border-2 border-blue-300 rounded-2xl p-5 bg-[#EBF3FD] space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-black uppercase tracking-wider text-blue-900">
-                      Storage Bay 2 · Cold Room Storage Unit B
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-blue-700 text-white">
-                      OCCUPIED
-                    </span>
-                  </div>
-                  <div className="text-2xl font-black text-gray-900 font-mono">$250.00 AUD <span className="text-xs font-normal text-gray-500">/ month</span></div>
-                  <div className="text-xs space-y-1 text-gray-700 pt-1 border-t border-blue-200">
-                    <div><b>Tenant:</b> ABC Catering Co.</div>
-                    <div><b>Lease Term:</b> Monthly Auto-Renew</div>
-                    <div><b>Security Deposit:</b> $200.00 (Held in Escrow)</div>
-                    <div><b>Status:</b> <span className="text-emerald-800 font-bold">Current & Paid</span></div>
-                  </div>
-                </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-100 text-[10px] uppercase font-bold text-gray-600">
+                    <tr>
+                      <th className="py-2.5 px-4">Ref</th>
+                      <th className="py-2.5 px-4">Tenant</th>
+                      <th className="py-2.5 px-4">Bay</th>
+                      <th className="py-2.5 px-4">Dates</th>
+                      <th className="py-2.5 px-4 text-right">Total</th>
+                      <th className="py-2.5 px-4">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {storageList.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-6 px-4 text-center text-gray-500">No storage bookings yet.</td>
+                      </tr>
+                    ) : (
+                      storageList.map((st) => (
+                        <tr key={st.reference_code}>
+                          <td className="py-3 px-4 font-mono">{st.reference_code}</td>
+                          <td className="py-3 px-4 font-bold">
+                            {st.full_name}
+                            {st.business_name ? ` (${st.business_name})` : ''}
+                          </td>
+                          <td className="py-3 px-4">
+                            #{st.bay_number} · {st.storage_type.replace('_', ' ')}
+                          </td>
+                          <td className="py-3 px-4">
+                            {formatDisplayDate(st.start_date)} → {formatDisplayDate(st.end_date)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono">${Number(st.total_price).toFixed(2)}</td>
+                          <td className="py-3 px-4 uppercase text-[10px] font-bold">
+                            {st.status} · {st.payment_status}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
         )}
 
-        {/* ========================================================
-            TAB 4: RATES & ATO TAX DETAILS
-           ======================================================== */}
         {activeTab === 'rates' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl p-6 sm:p-8 border border-gray-300 shadow-sm space-y-5">
               <div className="pb-4 border-b border-gray-200">
-                <h2 className="text-xl font-black text-gray-900">Commercial Rates & Official ATO Tax Settings</h2>
+                <h2 className="text-xl font-black text-gray-900">Business, Tax & Payment Settings</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Australian Taxation Office registration, pricing formulas, and bank transfer credentials.
+                  Read-only. These values come from the server configuration and are printed on every tax invoice.
                 </p>
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                
-                {/* ATO Details */}
-                <div className="p-5 rounded-2xl bg-[#F8FAF8] border border-gray-300 space-y-3 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
+                <div className="p-5 rounded-2xl bg-[#F8FAF8] border border-gray-300 space-y-2">
                   <div className="font-bold text-gray-900 text-sm flex items-center gap-2">
                     <Building className="w-4 h-4 text-[#112F21]" />
-                    <span>Registered Business & ATO Entity</span>
+                    <span>Seller (ATO)</span>
                   </div>
-                  <div className="space-y-2 text-gray-700">
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Legal Entity:</span>
-                      <span className="font-bold text-gray-900">Daily Drop Commercial Kitchens Pty Ltd</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Australian Business Number (ABN):</span>
-                      <span className="font-mono font-bold text-gray-900">51 824 753 556</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Facility Location:</span>
-                      <span className="font-semibold text-gray-900">Victoria Park, Perth, WA 6100</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Goods and Services Tax (GST):</span>
-                      <span className="font-bold text-emerald-800">10% Included on all rental fees</span>
-                    </div>
+                  <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                    <span className="text-gray-500">Legal entity</span>
+                    <span className="font-bold">{config?.seller?.legal_name || '—'}</span>
                   </div>
-                </div>
-
-                {/* Direct Banking Instructions */}
-                <div className="p-5 rounded-2xl bg-[#F8FAF8] border border-gray-300 space-y-3 text-xs">
-                  <div className="font-bold text-gray-900 text-sm flex items-center gap-2">
-                    <CreditCard className="w-4 h-4 text-[#112F21]" />
-                    <span>Direct Payment Instructions</span>
+                  <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                    <span className="text-gray-500">ABN</span>
+                    <span className="font-mono font-bold">{config?.seller?.abn || 'Not configured (SELLER_ABN)'}</span>
                   </div>
-                  <div className="space-y-2 text-gray-700">
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">PayID Identifier:</span>
-                      <span className="font-mono font-bold text-emerald-800">hello@dailydrop.today</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Bank Name:</span>
-                      <span className="font-semibold text-gray-900">National Australia Bank (NAB)</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">BSB Code:</span>
-                      <span className="font-mono font-bold text-gray-900">066-000</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Account Number:</span>
-                      <span className="font-mono font-bold text-gray-900">1234 5678</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-200 pb-1.5">
-                      <span className="text-gray-500">Account Name:</span>
-                      <span className="font-semibold text-gray-900">Daily Drop Kitchens Perth Operations</span>
-                    </div>
+                  <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                    <span className="text-gray-500">GST</span>
+                    <span className="font-bold">10% — kitchen prices ex GST; storage prices inc GST</span>
                   </div>
-                </div>
-
-                {/* Google Gemini AI Engine Integration */}
-                <div className="md:col-span-2 p-5 rounded-2xl bg-gradient-to-r from-emerald-50/70 via-white to-amber-50/60 border border-emerald-300 shadow-xs space-y-4 text-xs">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-200 pb-3">
-                    <div className="flex items-center gap-2">
-                      <Bot className="w-5 h-5 text-[#ED8533]" />
-                      <div>
-                        <div className="font-bold text-gray-900 text-sm">
-                          Google Gemini AI Agentic Engine
-                        </div>
-                        <div className="text-[11px] text-gray-500">
-                          Powering invoice risk scoring, 48h provisional rental audits, and executive queries
-                        </div>
-                      </div>
-                    </div>
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-900 border border-emerald-300 w-fit">
-                      <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
-                      API Connected &amp; Watchdog Active
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Kitchen packages</span>
+                    <span className="font-mono">
+                      {(config?.packages || []).map((p) => `${p.hours}h $${p.price}`).join(' · ') || '—'}
                     </span>
                   </div>
-
-                  <form onSubmit={handleSaveApiKey} className="space-y-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
-                        Google Gemini API Key
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <div className="relative flex-1">
-                          <Key className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-3" />
-                          <input
-                            type="password"
-                            value={apiKeyInput}
-                            onChange={(e) => setApiKeyInput(e.target.value)}
-                            placeholder="Enter Gemini API Key..."
-                            className="w-full pl-9 pr-3 py-2 text-xs font-mono bg-white rounded-xl border border-gray-300 focus:outline-none focus:border-[#112F21]"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          className="bg-[#112F21] hover:bg-[#1a4731] text-white px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
-                        >
-                          {apiKeySavedNotice ? '✓ Saved!' : 'Update Key'}
-                        </button>
-                      </div>
-                      <div className="text-[11px] text-gray-500 mt-1">
-                        Active key: <code className="bg-gray-100 px-1 py-0.5 rounded font-mono font-bold text-gray-800">{apiKeyInput ? `${apiKeyInput.slice(0, 10)}...${apiKeyInput.slice(-6)}` : 'None configured'}</code> (Stored securely in client environment &amp; localStorage)
-                      </div>
-                    </div>
-
-                    <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-300/80 space-y-1 text-[11px] text-amber-950">
-                      <div className="font-bold flex items-center gap-1.5 text-amber-900">
-                        <Sparkles className="w-3.5 h-3.5 text-[#ED8533]" />
-                        <span>Dual Intelligence Architecture:</span>
-                      </div>
-                      <p className="leading-relaxed">
-                        <b>1. Cloud Model:</b> Queries Google's flagship <code>gemini-2.5-flash</code> with live Daily Drop invoice context.<br />
-                        <b>2. Graceful Watchdog Engine:</b> If Google Cloud returns <code>403 (Billing required)</code> for a project key, the system automatically falls back to the embedded Australian commercial kitchen watchdog. All financial queries, high-risk detection, and escrow audits continue without any service downtime.
-                      </p>
-                    </div>
-                  </form>
                 </div>
-
+                <div className="p-5 rounded-2xl bg-[#F8FAF8] border border-gray-300 space-y-2">
+                  <div className="font-bold text-gray-900 text-sm flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-[#112F21]" />
+                    <span>Payment details shown to customers</span>
+                  </div>
+                  {pay ? (
+                    <>
+                      <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                        <span className="text-gray-500">Account name</span>
+                        <span className="font-bold">{pay.account_name || '—'}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                        <span className="text-gray-500">Bank</span>
+                        <span className="font-bold">{pay.bank_name || '—'}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                        <span className="text-gray-500">BSB / Account</span>
+                        <span className="font-mono font-bold">
+                          {pay.bsb || '—'} / {pay.account_number || '—'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">PayID</span>
+                        <span className="font-mono font-bold">{pay.payid || '—'}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-amber-800">
+                      No payment details configured. Set the PAYMENT_* variables on the server after verifying them with the bank.
+                    </p>
+                  )}
+                </div>
+                <div className="md:col-span-2 p-5 rounded-2xl bg-[#F8FAF8] border border-gray-300 space-y-1">
+                  <div className="font-bold text-gray-900 text-sm flex items-center gap-2">
+                    <Bot className="w-4 h-4 text-[#112F21]" />
+                    <span>Finance assistant</span>
+                  </div>
+                  <p className="leading-relaxed text-gray-700">
+                    Runs on the server for super admins only. If <code>GEMINI_API_KEY</code> is set on the server it uses Google
+                    Gemini with aggregated invoice data; otherwise it answers from built-in rules. API keys are never stored in the
+                    browser. Payment risk flags are simple rules (due date and time to shift), not AI.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -1407,11 +1295,13 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
               {/* Header: Company & Tax Details */}
               <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-xl font-black text-[#112F21]">Daily Drop Commercial Kitchens</h2>
-                  <p className="text-gray-500 font-medium">Daily Drop Kitchen Operations Pty Ltd</p>
-                  <div className="font-mono text-gray-700 mt-1 font-bold">ABN: 51 824 753 556</div>
-                  <div className="text-gray-500 mt-0.5">Albany Highway, Victoria Park, WA 6100, Australia</div>
-                  <div className="text-gray-500">Email: accounting@dailydrop.today · Web: dailydrop.today</div>
+                  <h2 className="text-xl font-black text-[#112F21]">{selectedInvoice.seller?.trading_name || 'Daily Drop Commercial Kitchens'}</h2>
+                  <p className="text-gray-500 font-medium">{selectedInvoice.seller?.legal_name}</p>
+                  <div className="font-mono text-gray-700 mt-1 font-bold">ABN: {selectedInvoice.seller?.abn}</div>
+                  <div className="text-gray-500 mt-0.5">{selectedInvoice.seller?.address}</div>
+                  <div className="text-gray-500">
+                    {selectedInvoice.seller?.email} · {selectedInvoice.seller?.phone}
+                  </div>
                 </div>
 
                 <div className="text-right space-y-1">
@@ -1419,8 +1309,11 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                   <div className="font-mono font-bold text-xs text-emerald-800">
                     Invoice #: {selectedInvoice.invoice_number}
                   </div>
-                  <div className="text-gray-500">Date: {selectedInvoice.issue_date}</div>
-                  <div className="text-gray-500">Due: {selectedInvoice.due_date}</div>
+                  <div className="text-gray-500">Date of issue: {formatDisplayDate(selectedInvoice.issue_date)}</div>
+                  <div className="text-gray-500">Due: {formatDisplayDate(selectedInvoice.due_date)}</div>
+                  {selectedInvoice.service_date_range && (
+                    <div className="text-gray-500">Supply: {selectedInvoice.service_date_range}</div>
+                  )}
                   <div>
                     <span className={`px-2.5 py-0.5 rounded text-[10px] font-black uppercase ${
                       selectedInvoice.status === 'paid'
@@ -1453,78 +1346,97 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                 )}
               </div>
 
-              {/* Itemized Line Items Table */}
+              {/* Itemized Line Items (amounts ex GST, GST shown per line) */}
               <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead className="bg-gray-100 text-[10px] uppercase font-bold text-gray-600 border-b border-gray-200">
                     <tr>
                       <th className="py-2.5 px-3">Description</th>
-                      <th className="py-2.5 px-3 text-center">Hours / Qty</th>
-                      <th className="py-2.5 px-3 text-right">Unit Rate (AUD)</th>
-                      <th className="py-2.5 px-3 text-right">Subtotal</th>
+                      <th className="py-2.5 px-3 text-center">Qty</th>
+                      <th className="py-2.5 px-3 text-right">Unit (ex GST)</th>
+                      <th className="py-2.5 px-3 text-right">GST</th>
+                      <th className="py-2.5 px-3 text-right">Amount (inc GST)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {selectedInvoice.line_items?.map((item, idx) => (
                       <tr key={idx}>
-                        <td className="py-2.5 px-3 font-medium text-gray-800">{item.description}</td>
-                        <td className="py-2.5 px-3 text-center font-mono">{item.hours_or_quantity ?? item.quantity ?? 1}</td>
-                        <td className="py-2.5 px-3 text-right font-mono">${(item.unit_rate ?? item.unit_price ?? 0).toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold text-gray-900">${item.total.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 font-medium text-gray-800">
+                          {item.description}
+                          {item.taxable === false && <span className="ml-1 text-gray-500">(GST-free)</span>}
+                        </td>
+                        <td className="py-2.5 px-3 text-center font-mono">{item.quantity ?? 1}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">${(item.unit_price ?? 0).toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">${(item.gst ?? 0).toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono font-bold text-gray-900">
+                          ${(item.total_inc_gst ?? item.total).toFixed(2)}
+                        </td>
                       </tr>
                     ))}
-                    {selectedInvoice.security_deposit > 0 && (
-                      <tr className="bg-blue-50/40 text-blue-900 font-medium">
-                        <td className="py-2.5 px-3">
-                          Refundable Security Deposit (Held in Escrow per Kitchen Policy)
-                        </td>
-                        <td className="py-2.5 px-3 text-center font-mono">1</td>
-                        <td className="py-2.5 px-3 text-right font-mono">${selectedInvoice.security_deposit.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold">${selectedInvoice.security_deposit.toFixed(2)}</td>
-                      </tr>
-                    )}
                   </tbody>
                 </table>
               </div>
 
-              {/* Totals Breakdown */}
+              {/* Totals: taxable supply first, refundable bond separately (not subject to GST) */}
               <div className="flex justify-end">
-                <div className="w-72 space-y-2 text-xs">
+                <div className="w-80 space-y-2 text-xs">
                   <div className="flex justify-between text-gray-600">
-                    <span>Facility Rental Subtotal:</span>
-                    <span className="font-mono font-semibold">${(selectedInvoice.total_amount / 1.1).toFixed(2)} AUD</span>
+                    <span>Subtotal (ex GST):</span>
+                    <span className="font-mono font-semibold">${(selectedInvoice.subtotal ?? 0).toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between text-gray-600">
-                    <span>GST (10% Australian Tax):</span>
-                    <span className="font-mono font-semibold">${(selectedInvoice.total_amount - (selectedInvoice.total_amount / 1.1)).toFixed(2)} AUD</span>
+                    <span>GST (10%):</span>
+                    <span className="font-mono font-semibold">${(selectedInvoice.gst ?? 0).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between font-bold text-gray-900 border-t border-gray-200 pt-1.5">
+                    <span>Total (inc GST):</span>
+                    <span className="font-mono">${selectedInvoice.total_amount.toFixed(2)}</span>
                   </div>
                   {selectedInvoice.security_deposit > 0 && (
                     <div className="flex justify-between text-blue-900">
-                      <span>Refundable Bond (Escrow):</span>
-                      <span className="font-mono font-bold">${selectedInvoice.security_deposit.toFixed(2)} AUD</span>
+                      <span>Refundable security bond (not subject to GST):</span>
+                      <span className="font-mono font-bold">${selectedInvoice.security_deposit.toFixed(2)}</span>
                     </div>
                   )}
                   <div className="flex justify-between text-base font-black text-gray-900 pt-2 border-t border-gray-300">
-                    <span>Total Amount Payable:</span>
+                    <span>Amount payable:</span>
                     <span className="font-mono text-emerald-900">
-                      ${(selectedInvoice.total_amount + selectedInvoice.security_deposit).toFixed(2)} AUD
+                      ${(selectedInvoice.amount_payable ?? selectedInvoice.total_amount + selectedInvoice.security_deposit).toFixed(2)} AUD
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* Direct Payment Banking Instructions */}
+              {/* Payment details: from server configuration only */}
               <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-300 text-xs space-y-1 text-emerald-950">
                 <div className="font-bold text-emerald-900 flex items-center gap-1.5">
                   <CreditCard className="w-3.5 h-3.5 text-emerald-800" />
-                  <span>Electronic Bank Transfer Details:</span>
+                  <span>How to pay</span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-[11px]">
-                  <div><b>PayID:</b> hello@dailydrop.today</div>
-                  <div><b>BSB:</b> 066-000</div>
-                  <div><b>Account #:</b> 1234 5678</div>
-                  <div><b>Reference:</b> {selectedInvoice.booking_reference || selectedInvoice.invoice_number}</div>
-                </div>
+                {pay ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-[11px]">
+                    {pay.payid && (
+                      <div>
+                        <b>PayID:</b> {pay.payid}
+                      </div>
+                    )}
+                    {pay.bsb && (
+                      <div>
+                        <b>BSB:</b> {pay.bsb}
+                      </div>
+                    )}
+                    {pay.account_number && (
+                      <div>
+                        <b>Account:</b> {pay.account_number}
+                      </div>
+                    )}
+                    <div>
+                      <b>Reference:</b> {selectedInvoice.booking_reference || selectedInvoice.invoice_number}
+                    </div>
+                  </div>
+                ) : (
+                  <div>Payment details will be provided by Daily Drop.</div>
+                )}
               </div>
 
             </div>
@@ -1573,12 +1485,10 @@ This is Daily Drop Commercial Kitchens (Victoria Park Hub).
 
 Your kitchen booking (${reminderInvoice.booking_reference || reminderInvoice.invoice_number}) is currently on provisional hold.
 
-Total Due: $${reminderInvoice.total_amount.toFixed(2)} AUD
-Direct PayID: hello@dailydrop.today
-Bank BSB: 066-000 | Account: 1234 5678
-Reference: ${reminderInvoice.booking_reference || reminderInvoice.invoice_number}
+Amount due: $${(reminderInvoice.amount_payable ?? reminderInvoice.total_amount).toFixed(2)} AUD (incl. refundable bond)
+${pay?.payid ? `PayID: ${pay.payid}\n` : ''}${pay?.bsb ? `BSB: ${pay.bsb} | Account: ${pay.account_number ?? ''}\n` : ''}Reference: ${reminderInvoice.booking_reference || reminderInvoice.invoice_number}
 
-To ensure your station is locked in and your 6-digit electronic access PIN is generated, please confirm payment today.
+Your access code appears in your Daily Drop dashboard once payment is recorded.
 
 Thank you!
 Daily Drop Kitchen Management`}
@@ -1587,7 +1497,7 @@ Daily Drop Kitchen Management`}
             <div className="flex flex-col sm:flex-row items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => {
-                  const text = `Hi ${reminderInvoice.customer_name},\n\nThis is Daily Drop Commercial Kitchens (Victoria Park Hub). Your kitchen booking (${reminderInvoice.booking_reference || reminderInvoice.invoice_number}) is currently on provisional hold.\n\nTotal Due: $${reminderInvoice.total_amount.toFixed(2)} AUD\nPayID: hello@dailydrop.today\nReference: ${reminderInvoice.booking_reference || reminderInvoice.invoice_number}\n\nPlease settle payment to activate your electronic keypad PIN. Thank you!`;
+                  const text = `Hi ${reminderInvoice.customer_name},\n\nThis is Daily Drop Commercial Kitchens (Victoria Park Hub). Your kitchen booking (${reminderInvoice.booking_reference || reminderInvoice.invoice_number}) is currently on provisional hold.\n\nAmount due: $${(reminderInvoice.amount_payable ?? reminderInvoice.total_amount).toFixed(2)} AUD\n${pay?.payid ? `PayID: ${pay.payid}\n` : ''}Reference: ${reminderInvoice.booking_reference || reminderInvoice.invoice_number}\n\nPlease settle payment to activate your electronic keypad PIN. Thank you!`;
                   navigator.clipboard.writeText(text);
                   setReminderCopied(true);
                   setTimeout(() => setReminderCopied(false), 3000);
@@ -1602,7 +1512,7 @@ Daily Drop Kitchen Management`}
                 onClick={() => {
                   const cleanPhone = (reminderInvoice.phone || reminderInvoice.customer_phone || '').replace(/[^0-9]/g, '');
                   const text = encodeURIComponent(
-                    `Hi ${reminderInvoice.customer_name}, Daily Drop Kitchens here. Your booking (${reminderInvoice.booking_reference || reminderInvoice.invoice_number}) is awaiting payment: $${reminderInvoice.total_amount.toFixed(2)} AUD via PayID hello@dailydrop.today. Please confirm so we can release your entry PIN!`
+                    `Hi ${reminderInvoice.customer_name}, Daily Drop Kitchens here. Your booking (${reminderInvoice.booking_reference || reminderInvoice.invoice_number}) is awaiting payment: $${(reminderInvoice.amount_payable ?? reminderInvoice.total_amount).toFixed(2)} AUD${pay?.payid ? ` via PayID ${pay.payid}` : ''}. Reference: ${reminderInvoice.booking_reference || reminderInvoice.invoice_number}.`
                   );
                   window.open(`https://wa.me/${cleanPhone}?text=${text}`, '_blank');
                 }}
@@ -1705,7 +1615,7 @@ Daily Drop Kitchen Management`}
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-gray-700 mb-1">Total Rental Amount (AUD) *</label>
+                  <label className="block font-bold text-gray-700 mb-1">Amount ex GST (AUD) *</label>
                   <input
                     type="number"
                     step="0.01"
@@ -1724,7 +1634,7 @@ Daily Drop Kitchen Management`}
                   step="0.01"
                   value={newInvDeposit}
                   onChange={(e) => setNewInvDeposit(e.target.value)}
-                  placeholder="750.00"
+                  placeholder="0.00"
                   className="w-full px-3.5 py-2 rounded-xl border border-gray-300 text-xs font-mono focus:outline-none"
                 />
               </div>

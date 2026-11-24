@@ -1,96 +1,140 @@
-# Daily Drop — Commercial Kitchen Hourly Rental Platform
+# Daily Drop — Commercial Kitchen & Storage Platform (v2, hardened)
 
-> **“Your Kitchen. Your Hours. Your Business.”**
+Booking platform for Daily Drop Commercial Kitchens, Victoria Park, Perth WA.
 
-A hyper-modern, premium, responsive web application for **Daily Drop**, enabling food businesses, cloud kitchens, caterers, food entrepreneurs, and artisan bakers to discover commercial kitchen facilities, select hourly slots, view transparent pricing, and submit booking requests.
+- **Frontend:** React 19 + TypeScript + Vite + Tailwind (`/frontend`)
+- **Backend:** Node.js + Express + MongoDB (Mongoose), layered as routes → controllers → services → models (`/backend`)
+- **Integrations:** Google Sheets reporting + customer emails via a secret-protected Apps Script webhook; optional Gemini finance assistant (server-side only)
 
----
-
-## 🍳 Platform Overview
-
-Daily Drop provides certified commercial kitchen infrastructure for rent on a flexible, hourly basis.
-- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Lucide Icons.
-- **Backend**: Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy ORM (SQLite / PostgreSQL support), JWT Authentication.
-- **Official Brand Design**: Built preserving Daily Drop's exact brand colors (Forest Green `#264329`, Vibrant Orange `#ED8533`, Soft Mint `#EBF5EE`, Off-white `#FAFCF9`) and official logo.
+This is a hardened rewrite of the original prototype. Every issue from the production-readiness review is listed in **[FIXES.md](FIXES.md)** with the change that fixed it and the test that proves it.
 
 ---
 
-## 🚀 Quick Start Guide
+## How it works
 
-### 1. Prerequisites
-- **Node.js**: v18+ (tested on v24)
-- **Python**: v3.10+ (tested on v3.11)
+| Concern | Design |
+|---|---|
+| Source of truth | MongoDB only. The browser holds a login token and nothing else. The Google Sheet is a downstream report. |
+| Double-booking | Each booking claims 30-minute slot documents under a **unique index**, inside a transaction. Two bookings (or a booking and a maintenance block) can never own the same slot. Tested with 20 simultaneous requests → exactly 1 succeeds. |
+| Time | Business dates/times are Perth wall-clock strings for display, and every booking also stores UTC `start_at`/`end_at`. Overnight shifts, "is it in the past" and next-day availability use absolute time. WA has no daylight saving (always UTC+08:00). |
+| Pricing | Kitchen: package/hourly prices **ex GST** from the admin-editable config, +10% GST. Storage: **GST-inclusive** rates. Money is stored in integer cents. The website renders prices from `GET /api/config`; the server prices every booking itself. |
+| Holds | New requests hold their slot for `BOOKING_HOLD_HOURS` (default 48) or until the shift starts. Unpaid holds expire automatically and free the slot. |
+| Payments | Bank transfer / PayID. Staff record a payment (with the bank reference); that marks the tax invoice paid, confirms the booking and issues a per-booking door code shown only to that customer. |
+| Tax invoices | Persisted, sequential (`INV-2026-00001`), never renumbered. Seller name/ABN snapshotted at issue, issue date = actual date of issue, GST per line, refundable bond shown separately and excluded from GST. Buyer ABN printed only if the customer gave a valid one. |
+| Roles | `hirer`, `staff_admin`, `super_admin` — stored on the user record and re-read from the database on every request. Finance routes are super-admin only. |
+| Sheets/email sync | Transactional outbox: jobs are written in the same transaction as the booking, then delivered by a background worker with timeouts, retries and backoff. Requests never wait on Google. |
 
-### 2. Backend Setup & Startup
+---
+
+## Local development
+
+Requirements: Node 20+ (22 recommended).
+
 ```bash
-# Navigate to the project root
-cd "Daily Drop Kitchen"
-
-# Initialize & seed database with realistic bookings and admin credentials
-python -m backend.seed
-
-# Start the FastAPI server on port 8000
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
-```
-The API documentation is accessible at:
-- **Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **ReDoc**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-
-### 3. Frontend Setup & Startup
-In a separate terminal window:
-```bash
-cd "Daily Drop Kitchen/frontend"
-
-# Install dependencies (already installed)
+# 1. API
+cd backend
+cp .env.example .env          # USE_IN_MEMORY_DB=true is fine for local work
 npm install
+npm run seed:demo             # prints demo hirer / staff / director logins (random passwords)
+npm run dev                   # http://localhost:8000/api/health
 
-# Start Vite dev server on port 5173
-npm run dev
+# 2. Website (new terminal)
+cd frontend
+npm install
+npm run dev                   # http://localhost:5173  (proxies /api to :8000)
 ```
-Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)** in your browser.
+
+Portals: `http://localhost:5173/#admin` (staff), `#superadmin` (finance), `#customer` (hirers).
+
+> With `USE_IN_MEMORY_DB=true` the first start downloads a MongoDB binary and data is lost on restart. For persistent local data point `MONGODB_URI` at a replica set (Atlas free tier works).
+
+### Tests
+
+```bash
+cd backend && npm test                 # 54 tests against a real MongoDB replica set
+cd frontend && npm run build && npm run lint
+
+# UI smoke tests: mount the real app against a running API
+SMOKE_API=http://127.0.0.1:8000/api \
+SMOKE_STAFF='staff@example.test:<password>' SMOKE_DIRECTOR='director@example.test:<password>' \
+  npx vitest run
+```
+
+CI (`.github/workflows/ci.yml`) runs all three on every push and pull request.
 
 ---
 
-## 🔐 Staff & Admin Management Portal
+## Production deployment
 
-An integrated operations portal is built into the application:
-- Click **"Staff Login"** in the top navigation bar or the footer link.
-- **Username**: `admin`
-- **Password**: `admin123`
+### 1. Database
+MongoDB Atlas (any tier; it's a replica set, which transactions require). Create a database user with access to one database, and restrict Network Access to your API host's egress IPs.
 
-### Features in the Admin Portal:
-1. **Live Analytics**: Total Bookings, Pending Reviews, Confirmed Revenue, Active Rental Hours, Customer Enquiries.
-2. **Booking Management**: Filter by status (`Pending`, `Approved`, `Confirmed`, `Completed`, `Rejected`). Search by name, brand, or reference code.
-3. **One-Click Actions**: Approve request, Confirm booking, Record payments (`Unpaid`, `Deposit Paid`, `Paid in Full`), and add administrative inspection notes.
-4. **Kitchen Settings**: Dynamically update the base hourly rate, minimum rental hours, daily operating hours (e.g., 06:00 to 23:00), cleaning fee, and security deposit. Updates apply immediately to customer rate calculators.
-5. **Maintenance & Blocked Slots**: Schedule maintenance, deep sanitation, or private production blocks that lock out customer booking.
-6. **Customer Enquiries**: View and manage incoming custom rental queries.
+If you are moving from the v1 database, run the migration **once**, dry-run first:
+
+```bash
+cd backend
+DRY_RUN=true npm run migrate:v2   # reports conflicts / orphaned records
+npm run migrate:v2
+```
+
+It converts v1 bookings and storage leases, removes the shared door PIN, archives v1 invoices, reports any existing double-bookings, and locks the v1 seed accounts whose passwords were published in the old repo.
+
+### 2. API
+Deploy `/backend` (a `Dockerfile` is included) to any Node host — Render, Railway, Fly.io, a VPS. Set environment variables from `backend/.env.example`. Required in production:
+
+| Variable | Notes |
+|---|---|
+| `NODE_ENV=production` | |
+| `MONGODB_URI` | Atlas connection string |
+| `JWT_SECRET` | 32+ random chars: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `SELLER_ABN` | Daily Drop's real ABN (checksum validated at startup) |
+| `CORS_ORIGINS` | The website's origin, e.g. `https://www.dailydrop.today` |
+| `TRUST_PROXY` | `1` behind a single load balancer |
+| `PAYMENT_*` | **Verify against the actual bank account.** Leave blank to hide payment details. |
+
+The server refuses to start if a required value is missing or invalid.
+
+Create staff accounts (passwords come from the environment, never the command line):
+
+```bash
+ADMIN_EMAIL=director@dailydrop.today ADMIN_PASSWORD='<12+ chars>' ADMIN_ROLE=super_admin npm run create-admin
+ADMIN_EMAIL=ops@dailydrop.today      ADMIN_PASSWORD='<12+ chars>' ADMIN_ROLE=staff_admin npm run create-admin
+```
+
+### 3. Google Sheets + emails (optional)
+Follow the header of `google-apps-script.js`: paste it into Apps Script, set the `WEBHOOK_SECRET` script property, deploy a **new** web app, then set `GOOGLE_SHEET_WEBHOOK_URL` and `GOOGLE_SHEET_WEBHOOK_SECRET` on the API. **Archive the old deployment** — its URL is public in the original repository and returns all customer data.
+
+### 4. Website
+Either host `/frontend/dist` anywhere static (Netlify, Vercel, S3/CloudFront, Pages), building with `VITE_API_BASE_URL=https://<your-api>/api`, or use the manual **Deploy website to GitHub Pages** workflow after setting the `VITE_API_BASE_URL` repository variable.
 
 ---
 
-## 💡 Key Architectural Highlights
+## Before going live — operational checklist
 
-1. **Conflict & Overlap Prevention**:
-   - Client and server validate that requested time slots do not overlap with existing confirmed or pending reservations.
-   - Restricts bookings to configured daily operating hours (06:00 – 23:00).
-   - Enforces minimum duration rules (minimum 2 hours).
+- [ ] Change the physical keypad code if `4892#` was ever real (it was published in the original repo).
+- [ ] Archive the old Apps Script deployment and rotate any Gemini key that was ever set in the old frontend.
+- [ ] Confirm `SELLER_ABN`, legal name and `PAYMENT_*` details with the business's accountant/bank.
+- [ ] Have the Terms & Conditions and privacy policy reviewed; bump `TERMS_VERSION` when they change.
+- [ ] Program door codes: the API issues a random 6-digit code per paid booking (or staff can set one). Either enter it on the keypad or integrate the keypad's API.
+- [ ] Set up Atlas backups and an uptime monitor on `/api/health`.
 
-2. **Transparent Dynamic Pricing Formula**:
-   $$\text{Total Cost} = (\text{Selected Hours} \times \text{Hourly Rate}) + \text{Cleaning Fee}$$
-   *(Plus refundable security deposit authorized prior to check-in).*
+## Project layout
 
-3. **Status Distinction**:
-   - Clearly distinguishes a **Booking Request** from a **Confirmed Reservation**.
-   - Displays clear notice: *"Your booking request has been received. Our team will contact you to confirm availability and payment."*
-
-4. **Calendar Integration**:
-   - Generates and downloads native `.ics` calendar files with session times, location, and reference codes for Google Calendar, Apple Calendar, and Outlook.
-
----
-
-## 🏢 Facility Information (Perth Hub 1)
-- **Address**: Unit 1, 1 Lichfield Street, Victoria Park, Perth, WA, 6101
-- **Phone**: 0479 175 705
-- **Email**: hello@dailydrop.today
-- **Kitchen Operating Hours**: Kitchen Timings 24 hours available (24/7 for booked shifts)
-- **WhatsApp**: +61479175705
+```
+backend/
+  src/
+    app.js, server.js          Express app (helmet, CORS allowlist, rate limits) and process lifecycle
+    config/                    env validation, DB connection, business constants
+    routes/index.js            every route and its guard in one place
+    middlewares/               auth (JWT + DB role), zod validation, rate limiting, error handling
+    controllers/               HTTP layer only
+    services/                  booking, storage, pricing, invoices, outbox, Gemini, documents, jobs
+    models/                    Mongoose schemas (Booking, BookingSlot, Invoice, Counter, OutboxJob, ...)
+    scripts/                   create-admin, seed:demo, migrate:v2
+  test/                        node:test + supertest against a real replica set
+frontend/
+  src/services/api.ts          thin typed API client (no local database, no secrets)
+  src/components/              UI
+  src/__tests__/               UI smoke tests
+google-apps-script.js          Sheets/email webhook (secret-protected, no data over GET)
+```

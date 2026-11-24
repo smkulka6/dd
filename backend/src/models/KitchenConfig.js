@@ -1,50 +1,44 @@
 const mongoose = require('mongoose');
-const {
-  DEFAULT_HOURLY_RATE,
-  MIN_RENTAL_HOURS,
-  OPERATING_START,
-  OPERATING_END,
-  KITCHEN_SECURITY_DEPOSIT,
-} = require('../config/constants');
+const { DEFAULT_KITCHEN_CONFIG: D } = require('../config/constants');
+
+const packageSchema = new mongoose.Schema(
+  {
+    hours: { type: Number, required: true, min: 1, max: 24 },
+    price: { type: Number, required: true, min: 0 }, // AUD ex GST
+    label: { type: String, default: '' },
+  },
+  { _id: false }
+);
 
 const kitchenConfigSchema = new mongoose.Schema(
   {
-    hourly_rental_rate: {
-      type: Number,
-      default: DEFAULT_HOURLY_RATE,
-    },
-    min_rental_hours: {
-      type: Number,
-      default: MIN_RENTAL_HOURS,
-    },
-    operating_hours_start: {
-      type: String,
-      default: OPERATING_START,
-    },
-    operating_hours_end: {
-      type: String,
-      default: OPERATING_END,
-    },
-    cleaning_fee: {
-      type: Number,
-      default: 0.0,
-    },
-    security_deposit: {
-      type: Number,
-      default: KITCHEN_SECURITY_DEPOSIT,
-    },
-    facility_name: {
-      type: String,
-      default: 'Daily Drop Commercial Kitchens (Victoria Park)',
-    },
-    facility_address: {
-      type: String,
-      default: 'Unit 1, 1 Lichfield St, Victoria Park, Perth WA 6101',
-    },
+    singleton: { type: String, default: 'kitchen', unique: true },
+    hourly_rental_rate: { type: Number, default: D.hourly_rental_rate, min: 0 },
+    min_rental_hours: { type: Number, default: D.min_rental_hours, min: 1, max: 24 },
+    packages: { type: [packageSchema], default: () => D.packages },
+    operating_hours_start: { type: String, default: D.operating_hours_start },
+    operating_hours_end: { type: String, default: D.operating_hours_end },
+    cleaning_fee: { type: Number, default: D.cleaning_fee, min: 0 },
+    security_deposit: { type: Number, default: D.security_deposit, min: 0 },
+    kitchen_name: { type: String, default: D.kitchen_name },
+    kitchen_address: { type: String, default: D.kitchen_address },
+    kitchen_phone: { type: String, default: D.kitchen_phone },
+    kitchen_email: { type: String, default: D.kitchen_email },
+    kitchen_whatsapp: { type: String, default: D.kitchen_whatsapp },
+    currency_symbol: { type: String, default: D.currency_symbol },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
+
+kitchenConfigSchema.statics.get = async function get() {
+  const existing = await this.findOne({ singleton: 'kitchen' });
+  if (existing) return existing;
+  try {
+    return await this.create({ singleton: 'kitchen' });
+  } catch (err) {
+    if (err.code === 11000) return this.findOne({ singleton: 'kitchen' });
+    throw err;
+  }
+};
 
 module.exports = mongoose.model('KitchenConfig', kitchenConfigSchema);
