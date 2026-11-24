@@ -1,11 +1,10 @@
 import React from 'react';
-import { 
-  Clock, 
-  Store, 
-  ChefHat, 
-  Users, 
-  Lightbulb, 
-  Sparkles, 
+import {
+  Clock,
+  Store,
+  ChefHat,
+  Users,
+  Lightbulb,
   Video,
   ArrowRight
 } from 'lucide-react';

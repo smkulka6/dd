@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Calendar, Phone, Menu, X, ShieldCheck, Clock, Shield, User as UserIcon, LogOut } from 'lucide-react';
+import { Calendar, Menu, X, ShieldCheck, Shield, User as UserIcon, LogOut } from 'lucide-react';
 import { Images } from '../assets/images';
 import { User } from '../types';
 

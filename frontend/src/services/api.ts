@@ -24,6 +24,8 @@ import type {
   Invoice,
   InvoiceStatus,
   SlotCheckResult,
+  AdjustmentNote,
+  BankReconcileResult,
 } from '../types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
@@ -314,10 +316,10 @@ export const api = {
     return { ...auth, user };
   },
 
-  async userLogin(email: string, password: string): Promise<UserAuthResponse> {
+  async userLogin(email: string, password: string, otp?: string): Promise<UserAuthResponse> {
     const auth = await request<UserAuthResponse>('/auth/login', {
       method: 'POST',
-      body: { email: email.trim().toLowerCase(), password },
+      body: { email: email.trim().toLowerCase(), password, otp: otp || undefined },
     });
     saveUserSession(auth);
     return auth;
@@ -334,6 +336,48 @@ export const api = {
   },
 
   getUserToken: () => store.get(KEYS.user),
+
+  forgotPassword: (email: string) =>
+    request<{ message: string }>('/auth/forgot-password', { method: 'POST', body: { email: email.trim().toLowerCase() } }),
+
+  /** Returns the new session when the account has no 2FA; otherwise just a message. */
+  async resetPassword(token: string, newPassword: string): Promise<{ message?: string; user?: User }> {
+    const res = await request<Partial<UserAuthResponse> & { message?: string }>('/auth/reset-password', {
+      method: 'POST',
+      body: { token, new_password: newPassword },
+    });
+    if (res.access_token && res.user && res.user.role === 'hirer') saveUserSession(res as UserAuthResponse);
+    return { message: res.message, user: res.user };
+  },
+
+  async verifyEmail(token: string): Promise<User> {
+    const res = await request<{ user: User }>('/auth/verify-email', { method: 'POST', body: { token } });
+    const current = api.getCurrentUser();
+    if (current && current.email === res.user.email) store.set(KEYS.currentUser, JSON.stringify(res.user));
+    return res.user;
+  },
+
+  resendVerification: () => request<{ message: string }>('/auth/resend-verification', { method: 'POST', scope: 'user' }),
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<User> {
+    const res = await request<UserAuthResponse>('/auth/password', {
+      method: 'POST',
+      scope: 'user',
+      body: { current_password: currentPassword, new_password: newPassword },
+    });
+    saveUserSession(res);
+    return res.user;
+  },
+
+  // ---------- Two-factor authentication (any signed-in scope) ----------
+  twoFactorSetup: (scope: Scope) => request<{ secret: string; otpauth_url: string }>('/auth/2fa/setup', { method: 'POST', scope }),
+
+  async twoFactorEnable(scope: Scope, code: string): Promise<UserAuthResponse> {
+    const res = await request<UserAuthResponse>('/auth/2fa/enable', { method: 'POST', scope, body: { code } });
+    if (scope === 'user') saveUserSession(res);
+    else store.set(scope === 'admin' ? KEYS.admin : KEYS.superadmin, res.access_token);
+    return res;
+  },
 
   userLogout() {
     store.remove(KEYS.user);
@@ -372,6 +416,23 @@ export const api = {
 
   getBookingByRef: (referenceCode: string) => request<Booking>(`/bookings/${encodeURIComponent(referenceCode)}`, { scope: 'user' }),
 
+  createRecurring: (data: {
+    booking_date: string;
+    start_time: string;
+    duration_hours: number;
+    frequency: 'weekly' | 'fortnightly';
+    occurrences: number;
+    phone: string;
+    intended_use?: string;
+    team_size?: number;
+    additional_notes?: string;
+  }) =>
+    request<{ series_id: string; created: Booking[]; skipped: { booking_date: string; reason: string }[] }>('/bookings/recurring', {
+      method: 'POST',
+      scope: 'user',
+      body: { ...data, terms_accepted: true },
+    }),
+
   cancelBooking: (referenceCode: string) =>
     request<Booking>(`/bookings/${encodeURIComponent(referenceCode)}/cancel`, { method: 'POST', scope: 'user' }),
 
@@ -399,10 +460,14 @@ export const api = {
   }) => request<StorageBooking>('/storage-bookings', { method: 'POST', scope: 'user', body: { ...data, terms_accepted: true } }),
 
   // ---------- Staff admin ----------
-  async adminLogin(username: string, password: string): Promise<{ access_token: string; username: string }> {
-    const res = await request<{ access_token: string; username: string }>('/admin/login', {
+  async adminLogin(
+    username: string,
+    password: string,
+    otp?: string
+  ): Promise<{ access_token: string; username: string; two_factor_setup_required?: boolean }> {
+    const res = await request<{ access_token: string; username: string; two_factor_setup_required?: boolean }>('/admin/login', {
       method: 'POST',
-      body: { username: username.trim().toLowerCase(), password },
+      body: { username: username.trim().toLowerCase(), password, otp: otp || undefined },
     });
     store.set(KEYS.admin, res.access_token);
     return res;
@@ -484,6 +549,8 @@ export const api = {
       body: typeof statusOrChanges === 'string' ? { status: statusOrChanges } : statusOrChanges,
     }),
 
+  getAdminUsers: (search?: string) => request<User[]>(`/admin/users?${qs({ search })}`, { scope: 'admin' }),
+
   userDocumentUrl: (userId: string, kind: 'food_safety_cert' | 'liability_insurance') =>
     `${API_BASE}/admin/users/${encodeURIComponent(userId)}/documents/${kind}`,
 
@@ -498,11 +565,18 @@ export const api = {
   },
 
   // ---------- Super admin (finance) ----------
-  async superAdminLogin(username: string, password: string): Promise<{ access_token: string; username: string; role: string }> {
-    const res = await request<{ access_token: string; username: string; role: string }>('/superadmin/login', {
-      method: 'POST',
-      body: { username: username.trim().toLowerCase(), password },
-    });
+  async superAdminLogin(
+    username: string,
+    password: string,
+    otp?: string
+  ): Promise<{ access_token: string; username: string; role: string; two_factor_setup_required?: boolean }> {
+    const res = await request<{ access_token: string; username: string; role: string; two_factor_setup_required?: boolean }>(
+      '/superadmin/login',
+      {
+        method: 'POST',
+        body: { username: username.trim().toLowerCase(), password, otp: otp || undefined },
+      }
+    );
     store.set(KEYS.superadmin, res.access_token);
     store.set(KEYS.superadminUser, res.username);
     return res;
@@ -571,6 +645,22 @@ export const api = {
       },
     });
   },
+
+  refundInvoice: (
+    invoiceNumber: string,
+    data: { amount: number; reason: string; method?: string; reference?: string; cancel_booking?: boolean }
+  ) =>
+    request<{ adjustment_note: AdjustmentNote; invoice: Invoice }>(`/invoices/${encodeURIComponent(invoiceNumber)}/refund`, {
+      method: 'POST',
+      scope: 'superadmin',
+      body: data,
+    }),
+
+  settleBond: (invoiceNumber: string, data: { refund_amount: number; forfeit_amount: number; reason?: string; reference?: string }) =>
+    request<{ invoice: Invoice }>(`/invoices/${encodeURIComponent(invoiceNumber)}/bond`, { method: 'POST', scope: 'superadmin', body: data }),
+
+  reconcileBank: (csv: string, apply: boolean) =>
+    request<BankReconcileResult>('/invoices/reconcile', { method: 'POST', scope: 'superadmin', body: { csv, apply } }),
 
   askFinanceAssistant: (query: string) =>
     request<{ answer: string; isLiveGemini: boolean; modelUsed?: string; errorNote?: string }>('/invoices/ai-query', {

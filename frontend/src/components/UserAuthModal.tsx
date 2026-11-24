@@ -39,6 +39,10 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
   promptMessage,
 }) => {
   const [tab, setTab] = useState<'login' | 'signup'>(initialTab);
+  // Forgot-password flow (shown in place of the login form)
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotSent, setForgotSent] = useState<string | null>(null);
   
   // Login fields
   const [loginEmail, setLoginEmail] = useState('');
@@ -262,7 +266,55 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
           )}
 
           {/* TAB 1: LOG IN FORM */}
-          {tab === 'login' && (
+          {tab === 'login' && forgotMode && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setErrorMessage(null);
+                setIsLoading(true);
+                try {
+                  const r = await api.forgotPassword(forgotEmail);
+                  setForgotSent(r.message);
+                } catch (err: any) {
+                  setErrorMessage(err.message || 'Could not send the reset email.');
+                } finally {
+                  setIsLoading(false);
+                }
+              }}
+              className="space-y-4 text-xs sm:text-sm"
+            >
+              <p className="text-brand-muted">Enter your account email and we'll send you a link to choose a new password.</p>
+              <input
+                type="email"
+                required
+                autoComplete="email"
+                value={forgotEmail}
+                onChange={(e) => setForgotEmail(e.target.value)}
+                placeholder="you@business.com.au"
+                className="w-full px-4 py-2.5 rounded-xl border border-gray-300 bg-white"
+              />
+              {forgotSent && <p className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800">{forgotSent}</p>}
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full bg-brand-forest text-white py-3 rounded-xl font-bold cursor-pointer disabled:opacity-50"
+              >
+                {isLoading ? 'Sending…' : 'Email me a reset link'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setForgotMode(false);
+                  setForgotSent(null);
+                }}
+                className="w-full text-brand-forest font-semibold underline cursor-pointer"
+              >
+                Back to sign in
+              </button>
+            </form>
+          )}
+
+          {tab === 'login' && !forgotMode && (
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-brand-dark mb-1.5">
@@ -303,6 +355,17 @@ export const UserAuthModal: React.FC<UserAuthModalProps> = ({
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotMode(true);
+                    setForgotEmail(loginEmail);
+                    setErrorMessage(null);
+                  }}
+                  className="mt-1.5 text-xs text-brand-forest font-semibold hover:underline cursor-pointer"
+                >
+                  Forgot password?
+                </button>
               </div>
 
               <button

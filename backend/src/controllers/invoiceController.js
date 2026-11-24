@@ -1,4 +1,7 @@
 const Invoice = require('../models/Invoice');
+const AdjustmentNote = require('../models/AdjustmentNote');
+const refundService = require('../services/refundService');
+const reconcileService = require('../services/reconcileService');
 const Booking = require('../models/Booking');
 const StorageBooking = require('../models/StorageBooking');
 const invoiceService = require('../services/invoiceService');
@@ -28,6 +31,7 @@ const withRisk = async (invoices) => {
   ]);
   const bMap = new Map(bookings.map((b) => [String(b._id), b]));
   const sMap = new Map(storages.map((s) => [String(s._id), s]));
+  const notes = await AdjustmentNote.find({ invoice: { $in: invoices.map((i) => i._id) } }).sort({ createdAt: 1 });
   return invoices.map((inv) => {
     const risk = invoiceService.assessRisk(inv, serviceStart(inv, bMap, sMap));
     return inv.toPublicShape({
@@ -35,6 +39,7 @@ const withRisk = async (invoices) => {
       ai_risk_reason: risk.reason,
       ai_recommended_action: risk.action,
       risk_source: 'rules',
+      adjustments: notes.filter((n) => String(n.invoice) === String(inv._id)).map((n) => n.toPublicShape()),
     });
   });
 };
@@ -143,4 +148,23 @@ const askAssistant = asyncHandler(async (req, res) => {
   res.json(await gemini.ask(req.body.query, ctx));
 });
 
-module.exports = { getInvoices, updateInvoiceStatus, createCustomInvoice, askAssistant };
+const refund = asyncHandler(async (req, res) => {
+  const { note, invoice } = await refundService.refundInvoice(req.user, req.params.invoiceId, req.body);
+  const [shaped] = await withRisk([invoice]);
+  res.status(201).json({ adjustment_note: note.toPublicShape(), invoice: shaped });
+});
+
+const settleBond = asyncHandler(async (req, res) => {
+  const inv = await refundService.settleBond(req.user, req.params.invoiceId, req.body);
+  const [shaped] = await withRisk([inv]);
+  res.json({ success: true, invoice: shaped });
+});
+
+const listAdjustmentNotes = asyncHandler(async (req, res) => {
+  const notes = await AdjustmentNote.find().sort({ createdAt: -1 }).limit(1000);
+  res.json(notes.map((n) => n.toPublicShape()));
+});
+
+const reconcileBankCsv = asyncHandler(async (req, res) => res.json(await reconcileService.reconcile(req.user, req.body)));
+
+module.exports = { getInvoices, updateInvoiceStatus, createCustomInvoice, askAssistant, refund, settleBond, listAdjustmentNotes, reconcileBankCsv, withRisk };

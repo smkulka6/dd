@@ -1,46 +1,41 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Calendar, 
-  Clock, 
-  CheckCircle2, 
-  CreditCard, 
-  Receipt, 
-  ExternalLink, 
-  ArrowRight, 
-  Download, 
-  FileText, 
-  Sparkles, 
-  Users, 
-  ChefHat, 
-  Flame, 
-  HelpCircle, 
-  Bell, 
-  ChevronRight, 
-  LayoutDashboard, 
-  BookOpen, 
-  RefreshCw, 
-  ShieldCheck, 
-  User, 
+import {
+  Calendar,
+  Clock,
+  CheckCircle2,
+  CreditCard,
+  Receipt,
+  ArrowRight,
+  Download,
+  FileText,
+  Sparkles,
+  Users,
+  ChefHat,
+  Flame,
+  HelpCircle,
+  Bell,
+  ChevronRight,
+  LayoutDashboard,
+  BookOpen,
+  RefreshCw,
+  ShieldCheck,
+  User,
   LogOut,
   MapPin,
-  Building,
   ArrowLeft,
   AlertCircle,
   Check,
   Search,
-  Lock,
-  Filter,
   Phone,
   Mail,
   Plus,
-  X,
-  FileCheck,
-  AlertTriangle,
   Package
 } from 'lucide-react';
 import { Images } from '../assets/images';
 import { api, formatDisplayDate } from '../services/api';
-import { User as UserType, StorageBooking, Invoice, PaymentDetails } from '../types';
+import { AccountSecurityPanel } from './account/AccountSecurityPanel';
+import { RecurringBookingForm } from './account/RecurringBookingForm';
+import { User as UserType, StorageBooking, Invoice, PaymentDetails, KitchenConfig } from '../types';
 
 interface CustomerDashboardProps {
   onBackToSite: () => void;
@@ -88,7 +83,6 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
 
   // Recurring form modal
   const [showRecurringModal, setShowRecurringModal] = useState<boolean>(false);
-  const [recurringSubmitted, setRecurringSubmitted] = useState<boolean>(false);
 
   // Account profile state
   const [profileSaved, setProfileSaved] = useState<boolean>(false);
@@ -104,8 +98,16 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
   const [userInvoices, setUserInvoices] = useState<Invoice[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pay, setPay] = useState<PaymentDetails | null>(null);
+  const [kitchenConfig, setKitchenConfig] = useState<KitchenConfig | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
-    api.getConfig().then((c) => setPay(c.payment_details || null)).catch(() => setPay(null));
+    api
+      .getConfig()
+      .then((c) => {
+        setKitchenConfig(c);
+        setPay(c.payment_details || null);
+      })
+      .catch(() => setPay(null));
   }, []);
 
   // Synchronize chef details when user logs in/out
@@ -165,7 +167,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
       }
     }
     loadData();
-  }, [currentUser]);
+  }, [currentUser, reloadKey]);
 
   // Invoices as shown in the Payments tab (real, from the server)
   const invoicesList = userInvoices.map((inv) => ({
@@ -1694,7 +1696,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
               <div className="flex items-center justify-between pb-4 border-b border-gray-100">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-full bg-[#1C4632] text-white flex items-center justify-center font-bold text-sm shadow-xs">
-                    MD
+                    {(chefName || '?').split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}
                   </div>
                   <div>
                     <h3 className="font-bold text-base text-gray-900">{chefName}</h3>
@@ -1823,6 +1825,17 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
               </form>
             </div>
           )}
+          {activeNav === 'account' && currentUser && (
+            <div className="mt-6">
+              <AccountSecurityPanel
+                user={currentUser}
+                onUserChange={(u) => {
+                  setCurrentUser(u);
+                  onUserAuthChange?.(u);
+                }}
+              />
+            </div>
+          )}
 
         </main>
       </div>
@@ -1920,12 +1933,12 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
         </div>
       )}
 
-      {/* Recurring Request Modal */}
-      {showRecurringModal && (
+      {/* Recurring Booking Modal */}
+      {showRecurringModal && currentUser && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-gray-200 space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-              <h3 className="font-bold text-base text-gray-900">Request Recurring Kitchen Schedule</h3>
+              <h3 className="font-bold text-base text-gray-900">Book a recurring shift</h3>
               <button
                 onClick={() => setShowRecurringModal(false)}
                 className="text-gray-400 hover:text-gray-600 font-bold text-lg p-1 cursor-pointer"
@@ -1933,106 +1946,12 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                 ✕
               </button>
             </div>
-
-            {recurringSubmitted ? (
-              <div className="p-5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 space-y-2 text-xs">
-                <div className="font-bold text-sm">Recurring Request Submitted!</div>
-                <p>
-                  Our kitchen facility manager will review your requested day & time slot to guarantee zero scheduling conflicts. We will confirm your recurring schedule within 24 hours.
-                </p>
-                <button
-                  onClick={() => {
-                    setRecurringSubmitted(false);
-                    setShowRecurringModal(false);
-                  }}
-                  className="mt-3 bg-[#112F21] text-white px-4 py-2 rounded-xl font-bold text-xs cursor-pointer"
-                >
-                  Done
-                </button>
-              </div>
-            ) : (
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  const fields = Array.from((e.currentTarget as HTMLFormElement).querySelectorAll('select, input, textarea'))
-                    .map((el) => (el as HTMLInputElement).value)
-                    .filter(Boolean)
-                    .join(' | ');
-                  try {
-                    await api.submitEnquiry({
-                      full_name: currentUser?.full_name || chefName,
-                      email: currentUser?.email || chefEmail,
-                      phone: currentUser?.phone || chefPhone,
-                      business_name: currentUser?.business_name,
-                      rental_type: 'Recurring schedule request',
-                      message: `Recurring schedule request: ${fields}`,
-                    });
-                    setRecurringSubmitted(true);
-                  } catch (err: any) {
-                    alert(err.message || 'Could not send your request. Please call or email us.');
-                  }
-                }}
-                className="space-y-4 text-xs"
-              >
-                <div>
-                  <label className="block font-bold text-gray-700 mb-1">Preferred Recurring Frequency</label>
-                  <select className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
-                    <option>Weekly (Same day each week)</option>
-                    <option>Fortnightly (Every 2 weeks)</option>
-                    <option>Monthly (Batch production)</option>
-                  </select>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-bold text-gray-700 mb-1">Preferred Day</label>
-                    <select className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
-                      <option>Monday</option>
-                      <option>Tuesday</option>
-                      <option>Wednesday</option>
-                      <option>Thursday</option>
-                      <option>Friday</option>
-                      <option>Saturday</option>
-                      <option>Sunday</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block font-bold text-gray-700 mb-1">Session Duration</label>
-                    <select className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
-                      <option>4 Hours (Half Day)</option>
-                      <option>8 Hours (Full Day Shift)</option>
-                      <option>12 Hours (High Volume)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-gray-700 mb-1">Target Start Time</label>
-                  <select className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
-                    <option>06:00 AM – 10:00 AM (Early Prep)</option>
-                    <option>10:00 AM – 02:00 PM (Midday Shift)</option>
-                    <option>02:00 PM – 06:00 PM (Afternoon Shift)</option>
-                    <option>06:30 PM – 10:30 PM (Evening Shift)</option>
-                  </select>
-                </div>
-
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowRecurringModal(false)}
-                    className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-700 py-2.5 rounded-xl font-bold cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 bg-[#ED8533] hover:bg-[#d87222] text-white py-2.5 rounded-xl font-bold cursor-pointer"
-                  >
-                    Submit Request
-                  </button>
-                </div>
-              </form>
-            )}
+            <RecurringBookingForm
+              user={currentUser}
+              config={kitchenConfig}
+              onCreated={() => setReloadKey((k) => k + 1)}
+              onClose={() => setShowRecurringModal(false)}
+            />
           </div>
         </div>
       )}

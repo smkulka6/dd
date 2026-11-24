@@ -1,18 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Calendar as CalendarIcon, 
-  ChevronLeft, 
-  ChevronRight, 
-  ChevronDown, 
-  ChevronUp, 
-  Clock, 
-  ChefHat, 
-  AlertCircle, 
-  CheckCircle2, 
-  X, 
-  Sparkles,
-  Lock,
-  Layers
+import {
+  Calendar as CalendarIcon,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  ChefHat,
+  X,
+  Lock
 } from 'lucide-react';
 import { api, formatDisplayDate, perthToday, addDaysToDate } from '../services/api';
 import { DayAvailabilitySummary, SlotInterval } from '../types';

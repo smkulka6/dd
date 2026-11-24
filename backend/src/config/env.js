@@ -42,6 +42,18 @@ const schema = z.object({
   GOOGLE_SHEET_WEBHOOK_URL: optionalString,
   GOOGLE_SHEET_WEBHOOK_SECRET: optionalString,
 
+  // Public website URL, used in emailed links (password reset, email verification).
+  APP_URL: z.string().default('http://localhost:5173'),
+  // Transactional email. smtp(s)://user:pass@host:port — e.g. Postmark, SendGrid, SES SMTP.
+  // When unset, emails go through the Google Apps Script webhook (if configured).
+  SMTP_URL: optionalString,
+  EMAIL_FROM: z.string().default('Daily Drop Kitchens <bookings@dailydrop.today>'),
+  REQUIRE_EMAIL_VERIFICATION: bool(false),
+  REQUIRE_ADMIN_2FA: bool(false),
+  // Key for encrypting 2FA secrets at rest (32+ chars). Falls back to a key derived from JWT_SECRET.
+  ENCRYPTION_KEY: optionalString,
+  RATE_LIMIT_STORE: z.enum(['memory', 'mongo']).optional(),
+
   GEMINI_API_KEY: optionalString,
   GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
 
@@ -95,6 +107,12 @@ if (env.SELLER_ABN) {
   problems.push('SELLER_ABN is required in production: tax invoices must show the seller ABN.');
 }
 
+if (env.ENCRYPTION_KEY && env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY must be at least 32 characters.');
+if (isProd && !/^https:\/\//.test(env.APP_URL)) problems.push('APP_URL must be the https:// address of the website in production.');
+if (env.REQUIRE_EMAIL_VERIFICATION && !env.SMTP_URL && !env.GOOGLE_SHEET_WEBHOOK_URL) {
+  problems.push('REQUIRE_EMAIL_VERIFICATION needs an email channel: set SMTP_URL or GOOGLE_SHEET_WEBHOOK_URL.');
+}
+
 if (env.GOOGLE_SHEET_WEBHOOK_URL && !env.GOOGLE_SHEET_WEBHOOK_SECRET) {
   problems.push('GOOGLE_SHEET_WEBHOOK_SECRET is required when GOOGLE_SHEET_WEBHOOK_URL is set.');
 }
@@ -120,6 +138,9 @@ const paymentDetails =
       }
     : null;
 
+env.APP_URL = env.APP_URL.replace(/\/+$/, '');
+const rateLimitStore = env.RATE_LIMIT_STORE || (isProd ? 'mongo' : 'memory');
+
 const trustProxy = /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY;
 
 module.exports = {
@@ -128,6 +149,8 @@ module.exports = {
   isTest,
   corsOrigins,
   paymentDetails,
+  rateLimitStore,
+  hasEmailChannel: Boolean(env.SMTP_URL || env.GOOGLE_SHEET_WEBHOOK_URL),
   trustProxy,
   seller: {
     legal_name: env.SELLER_LEGAL_NAME,

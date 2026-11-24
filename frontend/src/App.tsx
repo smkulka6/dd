@@ -14,13 +14,18 @@ import { WhyChoose } from './components/WhyChoose';
 import { FAQ } from './components/FAQ';
 import { Contact } from './components/Contact';
 import { Footer } from './components/Footer';
-import { AdminDashboard } from './components/AdminDashboard';
-import { SuperAdminPortal } from './components/SuperAdminPortal';
-import { CustomerDashboard } from './components/CustomerDashboard';
+// Portals load on demand, so customers browsing the website don't download the staff screens.
+const AdminDashboard = React.lazy(() => import('./components/AdminDashboard').then((m) => ({ default: m.AdminDashboard })));
+const SuperAdminPortal = React.lazy(() => import('./components/SuperAdminPortal').then((m) => ({ default: m.SuperAdminPortal })));
+const CustomerDashboard = React.lazy(() => import('./components/CustomerDashboard').then((m) => ({ default: m.CustomerDashboard })));
+
+const PortalLoading = () => (
+  <div className="min-h-screen flex items-center justify-center text-sm text-gray-500">Loading…</div>
+);
 import { UserAuthModal } from './components/UserAuthModal';
 import { KitchenConfig, Booking, User } from './types';
 import { api } from './services/api';
-import { Calendar, ArrowUp } from 'lucide-react';
+import { Calendar } from 'lucide-react';
 
 export function App() {
   const [config, setConfig] = useState<KitchenConfig | null>(null);
@@ -55,8 +60,13 @@ export function App() {
     const onExpired = (e: Event) => {
       if ((e as CustomEvent).detail?.scope === 'user') setCurrentUser(null);
     };
+    const onUpdated = (e: Event) => setCurrentUser(api.getCurrentUser() || ((e as CustomEvent).detail as User));
     window.addEventListener('dd:auth-expired', onExpired);
-    return () => window.removeEventListener('dd:auth-expired', onExpired);
+    window.addEventListener('dd:user-updated', onUpdated);
+    return () => {
+      window.removeEventListener('dd:auth-expired', onExpired);
+      window.removeEventListener('dd:user-updated', onUpdated);
+    };
   }, []);
 
   // Load config on startup
@@ -129,40 +139,46 @@ export function App() {
   // If viewing super admin panel (Executive & AI Oversight)
   if (viewMode === 'superadmin') {
     return (
-      <SuperAdminPortal
-        onBackToSite={() => setViewMode('site')}
-        onGoToAdminPortal={() => setViewMode('admin')}
-        onGoToCustomerPortal={() => setViewMode('customer')}
-      />
+      <React.Suspense fallback={<PortalLoading />}>
+        <SuperAdminPortal
+          onBackToSite={() => setViewMode('site')}
+          onGoToAdminPortal={() => setViewMode('admin')}
+          onGoToCustomerPortal={() => setViewMode('customer')}
+        />
+      </React.Suspense>
     );
   }
 
   // If viewing admin panel
   if (viewMode === 'admin') {
     return (
-      <AdminDashboard
-        onBackToSite={() => setViewMode('site')}
-        onConfigUpdated={(newConfig) => setConfig(newConfig)}
-        onGoToCustomerPortal={() => setViewMode('customer')}
-        onGoToSuperAdmin={() => setViewMode('superadmin')}
-      />
+      <React.Suspense fallback={<PortalLoading />}>
+        <AdminDashboard
+          onBackToSite={() => setViewMode('site')}
+          onConfigUpdated={(newConfig) => setConfig(newConfig)}
+          onGoToCustomerPortal={() => setViewMode('customer')}
+          onGoToSuperAdmin={() => setViewMode('superadmin')}
+        />
+      </React.Suspense>
     );
   }
 
   // If viewing customer dashboard
   if (viewMode === 'customer') {
     return (
-      <CustomerDashboard
-        onBackToSite={() => setViewMode('site')}
-        onGoToAdminPortal={() => setViewMode('admin')}
-        onBookClick={() => scrollToBooking()}
-        onBookStorage={() => scrollToStorage()}
-        onUserAuthChange={(user) => setCurrentUser(user)}
-      />
+      <React.Suspense fallback={<PortalLoading />}>
+        <CustomerDashboard
+          onBackToSite={() => setViewMode('site')}
+          onGoToAdminPortal={() => setViewMode('admin')}
+          onBookClick={() => scrollToBooking()}
+          onBookStorage={() => scrollToStorage()}
+          onUserAuthChange={(user) => setCurrentUser(user)}
+        />
+      </React.Suspense>
     );
   }
 
-  const hourlyRate = config?.hourly_rental_rate || 45.0;
+  const hourlyRate = config?.hourly_rental_rate || 38.0;
 
   return (
     <div className="min-h-screen flex flex-col bg-brand-cream text-brand-dark selection:bg-brand-mint selection:text-brand-forest">

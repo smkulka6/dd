@@ -1,13 +1,11 @@
 import React from 'react';
-import { 
-  PiggyBank, 
-  CalendarClock, 
-  Sliders, 
-  ChefHat, 
-  TrendingUp, 
-  HeartHandshake, 
-  ShieldCheck, 
-  Check 
+import {
+  PiggyBank,
+  CalendarClock,
+  ChefHat,
+  TrendingUp,
+  HeartHandshake,
+  ShieldCheck
 } from 'lucide-react';
 import { Images } from '../assets/images';
 

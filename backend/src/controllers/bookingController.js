@@ -58,9 +58,18 @@ const getBookingByRef = asyncHandler(async (req, res) => {
   res.json(b.toPublicShape({ admin, includeAccessCode: admin || (b.status === 'confirmed' && b.payment_status === 'paid') }));
 });
 
+const createRecurring = asyncHandler(async (req, res) => {
+  const out = await bookingService.createRecurringSeries(req.user, req.body, { ip: req.ip });
+  res.status(out.created.length ? 201 : 409).json({
+    series_id: out.series_id,
+    created: out.created.map((b) => b.toPublicShape()),
+    skipped: out.skipped,
+  });
+});
+
 const cancelBooking = asyncHandler(async (req, res) => {
   const b = await bookingService.cancelByCustomer(req.user, req.params.referenceCode);
   res.json(b.toPublicShape());
 });
 
-module.exports = { getConfig, getAvailability, getMonthAvailability, checkSlot, createBooking, getBookingByRef, cancelBooking };
+module.exports = { getConfig, getAvailability, getMonthAvailability, checkSlot, createBooking, createRecurring, getBookingByRef, cancelBooking };

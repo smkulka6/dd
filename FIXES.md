@@ -82,13 +82,28 @@ Verification: `backend/test/*.test.js` (54 tests, real MongoDB 8 replica set), `
 
 Customer dashboard mock bookings/invoices/recurring slots and a client-side "payment completed" that revealed the door PIN; super-admin fake bond ledger ("bond release initiated to Michael Davies") and fake storage tenants; customer directory fake ABNs; "AI audit synchronized from Google Sheets" messages.
 
-## Not done (needs a business decision or an external account)
+## Round 2 — the remaining gaps
 
-- **Automated payment reconciliation** (bank feed or a PayID/PayTo/card provider webhook). Payments are recorded by staff with the bank reference.
-- **Adjustment notes** for refunds of paid invoices (voiding a paid invoice is blocked with a message instead).
-- **Keypad integration**: door codes are generated per booking but must be entered on the keypad by staff.
-- **Recurring bookings**: requests are sent to staff as enquiries.
-- **Bond refund tracking** after inspection.
-- **Multi-instance scaling**: rate limits are in-memory (use a Redis store if running more than one API instance).
-- Large components (2–3k lines) and a 710 kB JS bundle with multi-MB images still need splitting/optimising.
+| Gap | What was built |
+|---|---|
+| Password reset | `POST /auth/forgot-password` (same reply whether or not the account exists, 30-min single-use token stored as a SHA-256 hash) and `POST /auth/reset-password` (signs every other session out). "Forgot password?" in the sign-in modal; the emailed link opens the reset form. |
+| Email verification | Verification link emailed on sign-up; `REQUIRE_EMAIL_VERIFICATION=true` blocks booking until verified. Resend from **My Account → Account security**. |
+| Admin two-factor | TOTP (Google Authenticator, 1Password, …) with replay protection and AES-256-GCM encrypted secrets. `REQUIRE_ADMIN_2FA=true` forces staff to enrol before anything else. Customers can opt in. |
+| Real emails | SMTP (`SMTP_URL`) or the Apps Script webhook; HTML rendered and escaped on the server; delivered through the outbox with retries. |
+| Refunds | Full or partial refunds of paid invoices create an ATO-style **adjustment note** (`ADJ-YYYY-NNNNN`) with proportional GST; optional booking cancellation. Shown on the tax invoice and to the customer. |
+| Bonds | Settle a storage bond after inspection: refund, partly forfeit or forfeit, with GST on the forfeited part (1/11). Bond status column and "Bonds currently held" total. |
+| Bank reconciliation | Upload a bank CSV (CBA/NAB/ANZ/Westpac shapes, day-first dates). Preview matches by booking reference or invoice number, flags wrong amounts and unknown references, then records the matches in one click. |
+| Recurring bookings | Weekly/fortnightly series (2–12 sessions) booked for real, each with its own invoice; clashes are skipped and reported. |
+| Multi-instance rate limits | MongoDB-backed limiter store (default in production) so limits hold across API instances. |
+| Missing UI | Customer directory, kitchen package editor, door code / payment reference fields on approval, storage reject/cancel, refund and bond dialogs, bank import, 2FA setup, account security panel. |
+| Bundle & images | Portals lazy-loaded; PNG photos converted/resized to JPEG. Build output 52 MB → 9 MB, main script 441 kB. |
+| Deployment | `render.yaml` blueprint (API + website), CI can be run by hand from the Actions tab. |
+
+## Still not done (needs a business decision or an external account)
+
+- **Automatic bank feed / payment provider** (PayTo, Stripe, a bank API). The CSV import covers it manually.
+- **Keypad integration**: door codes are generated per booking but must be entered on the keypad by staff unless the keypad vendor has an API.
+- Real business details: ABN, legal name, bank account, email sender domain (SPF/DKIM).
 - Legal review of Terms & Conditions and a privacy policy.
+- Hosting, Atlas, SMTP and monitoring accounts, and running `migrate:v2` once on the real database.
+- Splitting the largest components (AdminDashboard, SuperAdminPortal) into smaller files; 37 lint warnings remain (hook dependency style).

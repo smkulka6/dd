@@ -1,21 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Calendar as CalendarIcon, 
-  Clock, 
-  DollarSign, 
-  ShieldCheck, 
-  Users, 
-  ChefHat, 
-  AlertCircle, 
-  CheckCircle, 
-  Sparkles, 
-  Info, 
-  Loader2, 
-  Lock, 
-  ArrowRight, 
-  ArrowLeft, 
-  Check, 
-  Mail, 
+import {
+  Calendar as CalendarIcon,
+  Clock,
+  ShieldCheck,
+  ChefHat,
+  AlertCircle,
+  CheckCircle,
+  Sparkles,
+  Loader2,
+  Lock,
+  ArrowRight,
+  ArrowLeft,
   CreditCard,
   Package,
   ExternalLink,
@@ -530,6 +525,11 @@ export const BookingEngine: React.FC<BookingEngineProps> = ({
                     </div>
 
                     {/* Conflict Warning or Success */}
+                    {availabilityError && (
+                      <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                        Couldn't load the day's schedule: {availabilityError}
+                      </div>
+                    )}
                     {slotConflict.hasConflict ? (
                       <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-start space-x-2.5">
                         <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />

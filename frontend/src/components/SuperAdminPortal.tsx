@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Sparkles,
   Bot,
   AlertTriangle,
   CheckCircle2,
@@ -8,40 +7,30 @@ import {
   CreditCard,
   Download,
   ExternalLink,
-  FileText,
-  Filter,
   Plus,
   RefreshCw,
   Search,
   Send,
   ShieldCheck,
-  TrendingUp,
   X,
   Printer,
   Receipt,
-  ChevronRight,
-  Calendar,
   Building,
-  Phone,
-  Mail,
   Lock,
   Package,
-  HelpCircle,
   Copy,
   Check,
-  ArrowLeft,
   LogOut,
   Shield,
-  Layers,
-  DollarSign,
   AlertCircle,
-  Sliders,
-  Eye,
-  Key
+  Sliders
 } from 'lucide-react';
-import { Invoice, InvoiceStatus, AIRiskLevel, KitchenConfig, StorageBooking } from '../types';
+import { Invoice, KitchenConfig, StorageBooking } from '../types';
 import { api, formatDisplayDate } from '../services/api';
 import { geminiService } from '../services/geminiService';
+import { TwoFactorSetup } from './account/TwoFactorSetup';
+import { BankImport } from './finance/BankImport';
+import { RefundDialog, BondDialog } from './finance/InvoiceDialogs';
 import { Images } from '../assets/images';
 
 interface SuperAdminPortalProps {
@@ -60,6 +49,10 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const [config, setConfig] = useState<KitchenConfig | null>(null);
   const [storageList, setStorageList] = useState<StorageBooking[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showBankImport, setShowBankImport] = useState(false);
+  const [refundTarget, setRefundTarget] = useState<Invoice | null>(null);
+  const [bondTarget, setBondTarget] = useState<Invoice | null>(null);
+  const replaceInvoice = (inv: Invoice) => setInvoices((prev) => prev.map((i) => (i.id === inv.id ? inv : i)));
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => setConfig(null));
     const onExpired = (e: Event) => {
@@ -71,6 +64,9 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const pay = config?.payment_details || null;
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
+  const [otpInput, setOtpInput] = useState('');
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [needs2fa, setNeeds2fa] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
@@ -156,6 +152,10 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
       setInvoices(data);
       setStorageList(storage);
     } catch (err: any) {
+      if (err.details?.two_factor_setup_required) {
+        setNeeds2fa(true);
+        return;
+      }
       setLoadError(err.message || 'Could not load invoices from the server.');
     } finally {
       setLoadingInvoices(false);
@@ -174,10 +174,14 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
     setLoginError(null);
     setIsLoggingIn(true);
     try {
-      const res = await api.superAdminLogin(usernameInput, passwordInput);
+      const res = await api.superAdminLogin(usernameInput, passwordInput, otpInput);
+      setPasswordInput('');
+      setOtpInput('');
+      setOtpRequired(false);
+      setNeeds2fa(Boolean(res.two_factor_setup_required));
       setToken(res.access_token);
-      loadInvoices();
     } catch (err: any) {
+      if (err.details?.otp_required) setOtpRequired(true);
       setLoginError(err.message || 'Invalid Super Admin credentials');
     } finally {
       setIsLoggingIn(false);
@@ -293,7 +297,11 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   const totalInvoiced = useMemo(() => invoices.reduce((sum, i) => sum + (i.status !== 'void' ? i.total_amount : 0), 0), [invoices]);
   const totalPaidRevenue = useMemo(() => invoices.filter((i) => i.status === 'paid').reduce((sum, i) => sum + i.total_amount, 0), [invoices]);
   const totalPending = useMemo(() => invoices.filter((i) => i.status === 'pending' || i.status === 'overdue').reduce((sum, i) => sum + i.total_amount, 0), [invoices]);
-  const totalBondsHeld = useMemo(() => invoices.filter((i) => i.status === 'paid').reduce((sum, i) => sum + (i.security_deposit || 0), 0), [invoices]);
+  const totalBondsHeld = useMemo(() => invoices
+        .filter((i) => i.status === 'paid' && (!i.bond_status || i.bond_status === 'held'))
+        .reduce((sum, i) => sum + (i.security_deposit || 0), 0),
+    [invoices]
+  );
   const highRiskList = useMemo(() => invoices.filter((i) => i.ai_risk_level === 'high' || i.ai_risk_level === 'critical' || i.status === 'overdue'), [invoices]);
 
   // Create Manual Invoice Handler
@@ -330,6 +338,21 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
   // ========================================================
   // RENDER: SUPER ADMIN LOGIN SCREEN (Clean, No Stored Creds Displayed)
   // ========================================================
+  if (token && needs2fa) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+        <TwoFactorSetup
+          scope="superadmin"
+          onDone={() => {
+            setNeeds2fa(false);
+            setToken(api.getSuperAdminToken());
+          }}
+          onCancel={handleLogout}
+        />
+      </div>
+    );
+  }
+
   if (!token) {
     return (
       <div className="min-h-screen bg-[#EAEFEA] flex items-center justify-center p-4 selection:bg-amber-200">
@@ -359,13 +382,14 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
           <form onSubmit={handleSuperAdminLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-gray-700 mb-1">
-                Super Admin Username / Email
+                Director email
               </label>
               <input
-                type="text"
+                type="email"
+                autoComplete="username"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
-                placeholder="Enter username"
+                placeholder="you@dailydrop.today"
                 className="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-xs focus:ring-2 focus:ring-[#112F21] focus:outline-none bg-gray-50/50"
                 required
               />
@@ -377,11 +401,29 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                 type="password"
                 value={passwordInput}
                 onChange={(e) => setPasswordInput(e.target.value)}
+                autoComplete="current-password"
                 placeholder="••••••••"
                 className="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-xs focus:ring-2 focus:ring-[#112F21] focus:outline-none bg-gray-50/50"
                 required
               />
             </div>
+
+            {otpRequired && (
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">Authenticator code</label>
+                <input
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={otpInput}
+                  onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, ''))}
+                  placeholder="6-digit code"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-300 text-sm font-mono tracking-widest text-center"
+                  autoFocus
+                  required
+                />
+              </div>
+            )}
 
             <button
               type="submit"
@@ -598,6 +640,15 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                 >
                   <RefreshCw className={`w-3.5 h-3.5 text-[#ED8533] ${isAuditing ? 'animate-spin' : ''}`} />
                   <span>{isAuditing ? 'Refreshing...' : 'Refresh invoices'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowBankImport(true)}
+                  className="bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 px-3.5 py-2 rounded-xl font-bold text-xs shadow-2xs flex items-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#112F21]" />
+                  <span>Import bank CSV</span>
                 </button>
 
                 <button
@@ -1033,8 +1084,19 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                                 </button>
                               )}
 
+                              {/* Refund (paid invoices) */}
+                              {inv.status === 'paid' && (inv.refunded_amount || 0) < inv.total_amount && (
+                                <button
+                                  onClick={() => setRefundTarget(inv)}
+                                  className="bg-white border border-gray-300 hover:bg-gray-50 text-gray-800 px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer"
+                                  title="Refund and issue an adjustment note"
+                                >
+                                  Refund
+                                </button>
+                              )}
+
                               {/* Mark Paid Button */}
-                              {inv.status !== 'paid' && (
+                              {inv.status !== 'paid' && inv.status !== 'void' && (
                                 <button
                                   onClick={() => handleMarkPaid(inv)}
                                   className="bg-[#112F21] hover:bg-[#1a4731] text-white px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer shadow-2xs"
@@ -1072,7 +1134,7 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                   </p>
                 </div>
                 <div className="p-4 rounded-2xl bg-blue-50 border border-blue-200 text-right">
-                  <div className="text-[10px] text-blue-800 font-bold uppercase">Total bonds received</div>
+                  <div className="text-[10px] text-blue-800 font-bold uppercase">Bonds currently held</div>
                   <div className="text-2xl font-black text-blue-950 font-mono">${totalBondsHeld.toFixed(2)} AUD</div>
                 </div>
               </div>
@@ -1085,12 +1147,14 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                       <th className="py-2.5 px-4">Invoice</th>
                       <th className="py-2.5 px-4 text-right">Bond</th>
                       <th className="py-2.5 px-4">Paid</th>
+                      <th className="py-2.5 px-4">Status</th>
+                      <th className="py-2.5 px-4 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {invoices.filter((i) => i.status === 'paid' && (i.security_deposit || 0) > 0).length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="py-6 px-4 text-center text-gray-500">No bonds received yet.</td>
+                        <td colSpan={7} className="py-6 px-4 text-center text-gray-500">No bonds received yet.</td>
                       </tr>
                     ) : (
                       invoices
@@ -1105,6 +1169,24 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                             <td className="py-3 px-4 font-mono">{i.invoice_number}</td>
                             <td className="py-3 px-4 text-right font-mono font-bold">${(i.security_deposit || 0).toFixed(2)}</td>
                             <td className="py-3 px-4">{i.paid_at ? formatDisplayDate(i.paid_at) : '—'}</td>
+                            <td className="py-3 px-4 text-[11px]">
+                              {i.bond_status === 'held' || !i.bond_status
+                                ? 'Held'
+                                : i.bond_status === 'refunded'
+                                  ? 'Refunded in full'
+                                  : `Kept $${(i.bond_forfeited || 0).toFixed(2)} — ${i.bond_reason || ''}`}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              {(i.bond_status === 'held' || !i.bond_status) && (
+                                <button
+                                  type="button"
+                                  onClick={() => setBondTarget(i)}
+                                  className="px-2.5 py-1 rounded-lg bg-[#112F21] text-white text-[11px] font-bold cursor-pointer"
+                                >
+                                  Settle
+                                </button>
+                              )}
+                            </td>
                           </tr>
                         ))
                     )}
@@ -1256,6 +1338,32 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
 
       </main>
 
+      {showBankImport && <BankImport onClose={() => setShowBankImport(false)} onApplied={loadInvoices} />}
+      {refundTarget && (
+        <RefundDialog
+          invoice={refundTarget}
+          onClose={() => setRefundTarget(null)}
+          onDone={(inv, note) => {
+            replaceInvoice(inv);
+            setRefundTarget(null);
+            setAuditToast(`✓ Refund recorded on ${inv.invoice_number}. Adjustment note ${note} issued and emailed.`);
+            setTimeout(() => setAuditToast(null), 6000);
+          }}
+        />
+      )}
+      {bondTarget && (
+        <BondDialog
+          invoice={bondTarget}
+          onClose={() => setBondTarget(null)}
+          onDone={(inv) => {
+            replaceInvoice(inv);
+            setBondTarget(null);
+            setAuditToast(`✓ Bond settled for ${inv.booking_reference || inv.invoice_number}.`);
+            setTimeout(() => setAuditToast(null), 6000);
+          }}
+        />
+      )}
+
       {/* ========================================================
           MODAL 1: OFFICIAL ATO TAX INVOICE PREVIEW
          ======================================================== */}
@@ -1406,6 +1514,30 @@ export const SuperAdminPortal: React.FC<SuperAdminPortalProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Adjustment notes and bond outcome */}
+              {(selectedInvoice.adjustments?.length || 0) > 0 && (
+                <div className="p-4 rounded-2xl border border-amber-300 bg-amber-50 text-xs space-y-1">
+                  <div className="font-bold text-amber-900">Adjustment notes</div>
+                  {selectedInvoice.adjustments!.map((a) => (
+                    <div key={a.note_number} className="flex justify-between gap-2">
+                      <span>
+                        <b className="font-mono">{a.note_number}</b> · {formatDisplayDate(a.issue_date)} · {a.reason}
+                      </span>
+                      <span className="font-mono">
+                        −${a.amount.toFixed(2)} (GST −${a.gst.toFixed(2)})
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {selectedInvoice.bond_status && selectedInvoice.bond_status !== 'held' && (
+                <div className="p-4 rounded-2xl border border-blue-200 bg-blue-50 text-xs">
+                  Bond settled: refunded ${(selectedInvoice.bond_refunded || 0).toFixed(2)}
+                  {(selectedInvoice.bond_forfeited || 0) > 0 &&
+                    `, kept $${(selectedInvoice.bond_forfeited || 0).toFixed(2)} incl. GST $${(selectedInvoice.bond_forfeit_gst || 0).toFixed(2)} (${selectedInvoice.bond_reason})`}
+                </div>
+              )}
 
               {/* Payment details: from server configuration only */}
               <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-300 text-xs space-y-1 text-emerald-950">

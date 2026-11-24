@@ -70,6 +70,20 @@ const invoiceSchema = new mongoose.Schema(
     amount_payable_cents: { type: Number, required: true },
 
     status: { type: String, enum: ['pending', 'paid', 'void'], default: 'pending', index: true },
+    // Refunds of the taxable amount, each backed by an AdjustmentNote
+    refunded_cents: { type: Number, default: 0 },
+    refunded_gst_cents: { type: Number, default: 0 },
+    // Security bond outcome after the post-use inspection
+    bond: {
+      status: { type: String, enum: ['held', 'refunded', 'partly_forfeited', 'forfeited'], default: 'held' },
+      refunded_cents: { type: Number, default: 0 },
+      forfeited_cents: { type: Number, default: 0 },
+      // A forfeited bond becomes consideration: 1/11 of it is GST (GST Act s 99-10)
+      forfeit_gst_cents: { type: Number, default: 0 },
+      reason: { type: String, default: '' },
+      reference: { type: String, default: '' },
+      settled_at: { type: Date },
+    },
     payments: { type: [paymentSchema], default: [] },
     paid_at: { type: Date },
     void_reason: { type: String, default: '' },
@@ -126,6 +140,14 @@ invoiceSchema.methods.toPublicShape = function toPublicShape(extra = {}) {
     void_reason: this.void_reason || undefined,
     notes: this.notes || undefined,
     reconciled_by_ai: false,
+    refunded_amount: toDollars(this.refunded_cents),
+    refunded_gst: toDollars(this.refunded_gst_cents),
+    bond_status: this.security_deposit_cents > 0 ? this.bond?.status || 'held' : undefined,
+    bond_refunded: toDollars(this.bond?.refunded_cents),
+    bond_forfeited: toDollars(this.bond?.forfeited_cents),
+    bond_forfeit_gst: toDollars(this.bond?.forfeit_gst_cents),
+    bond_settled_at: this.bond?.settled_at?.toISOString(),
+    bond_reason: this.bond?.reason || undefined,
     created_at: this.createdAt?.toISOString(),
     ...extra,
   };

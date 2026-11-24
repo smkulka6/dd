@@ -8,13 +8,13 @@ import applianceRange from './cooking_range.jpg';
 import applianceStorage from './cold_storage.jpg';
 
 // Exact Actual Daily Drop Commercial Kitchen Photos with updated people from 'DD kitchen pics'
-import picImage from '../kitchen_actual/image.png';
-import picCopy from '../kitchen_actual/image copy.png';
-import picCopy2 from '../kitchen_actual/image copy 2.png';
-import picCopy3 from '../kitchen_actual/image copy 3.png';
-import picCopy4 from '../kitchen_actual/image copy 4.png';
-import picCopy5 from '../kitchen_actual/image copy 5.png';
-import picCopy6 from '../kitchen_actual/image copy 6.png';
+import picImage from '../kitchen_actual/image.jpg';
+import picCopy from '../kitchen_actual/image copy.jpg';
+import picCopy2 from '../kitchen_actual/image copy 2.jpg';
+import picCopy3 from '../kitchen_actual/image copy 3.jpg';
+import picCopy4 from '../kitchen_actual/image copy 4.jpg';
+import picCopy5 from '../kitchen_actual/image copy 5.jpg';
+import picCopy6 from '../kitchen_actual/image copy 6.jpg';
 
 export const Images = {
   logo: dailyDropLogo,

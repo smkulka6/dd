@@ -1,12 +1,11 @@
 import React from 'react';
-import { 
-  Calendar, 
-  Search, 
-  FileCheck2, 
-  Key, 
-  ArrowRight, 
-  ShieldCheck, 
-  CheckCircle2 
+import {
+  Calendar,
+  Search,
+  FileCheck2,
+  Key,
+  ShieldCheck,
+  CheckCircle2
 } from 'lucide-react';
 
 interface HowItWorksProps {

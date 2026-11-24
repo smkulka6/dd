@@ -80,7 +80,9 @@ npm run migrate:v2
 It converts v1 bookings and storage leases, removes the shared door PIN, archives v1 invoices, reports any existing double-bookings, and locks the v1 seed accounts whose passwords were published in the old repo.
 
 ### 2. API
-Deploy `/backend` (a `Dockerfile` is included) to any Node host — Render, Railway, Fly.io, a VPS. Set environment variables from `backend/.env.example`. Required in production:
+**Quickest:** on Render, *New → Blueprint* and pick this repo; `render.yaml` creates the API and website and generates `JWT_SECRET` / `ENCRYPTION_KEY`. Fill in the values it asks for.
+
+Or deploy `/backend` (a `Dockerfile` is included) to any Node host — Railway, Fly.io, a VPS. Set environment variables from `backend/.env.example`. Required in production:
 
 | Variable | Notes |
 |---|---|
@@ -91,6 +93,12 @@ Deploy `/backend` (a `Dockerfile` is included) to any Node host — Render, Rail
 | `CORS_ORIGINS` | The website's origin, e.g. `https://www.dailydrop.today` |
 | `TRUST_PROXY` | `1` behind a single load balancer |
 | `PAYMENT_*` | **Verify against the actual bank account.** Leave blank to hide payment details. |
+| `APP_URL` | Website URL (https) used in emailed links |
+| `SMTP_URL`, `EMAIL_FROM` | Email delivery, e.g. `smtps://user:pass@smtp.example.com:465` (or use the Apps Script webhook) |
+| `REQUIRE_ADMIN_2FA` | `true` — staff must enrol an authenticator app |
+| `REQUIRE_EMAIL_VERIFICATION` | `true` to block bookings until the email is confirmed (needs SMTP or webhook) |
+| `ENCRYPTION_KEY` | 32+ random chars; encrypts 2FA secrets |
+| `RATE_LIMIT_STORE` | `mongo` (default in production) shares limits across instances |
 
 The server refuses to start if a required value is missing or invalid.
 
@@ -100,6 +108,8 @@ Create staff accounts (passwords come from the environment, never the command li
 ADMIN_EMAIL=director@dailydrop.today ADMIN_PASSWORD='<12+ chars>' ADMIN_ROLE=super_admin npm run create-admin
 ADMIN_EMAIL=ops@dailydrop.today      ADMIN_PASSWORD='<12+ chars>' ADMIN_ROLE=staff_admin npm run create-admin
 ```
+
+Add `ADMIN_TOTP=true` to enrol two-factor at the same time (prints the key / `otpauth://` link to scan). Otherwise staff are asked to set it up at first sign-in when `REQUIRE_ADMIN_2FA=true`.
 
 ### 3. Google Sheets + emails (optional)
 Follow the header of `google-apps-script.js`: paste it into Apps Script, set the `WEBHOOK_SECRET` script property, deploy a **new** web app, then set `GOOGLE_SHEET_WEBHOOK_URL` and `GOOGLE_SHEET_WEBHOOK_SECRET` on the API. **Archive the old deployment** — its URL is public in the original repository and returns all customer data.
@@ -117,6 +127,14 @@ Either host `/frontend/dist` anywhere static (Netlify, Vercel, S3/CloudFront, Pa
 - [ ] Have the Terms & Conditions and privacy policy reviewed; bump `TERMS_VERSION` when they change.
 - [ ] Program door codes: the API issues a random 6-digit code per paid booking (or staff can set one). Either enter it on the keypad or integrate the keypad's API.
 - [ ] Set up Atlas backups and an uptime monitor on `/api/health`.
+- [ ] Configure SMTP with SPF/DKIM for the sender domain, then turn on `REQUIRE_EMAIL_VERIFICATION`.
+
+## Staff features
+
+- **Approvals:** set a door code and payment reference when approving; reject or cancel storage requests.
+- **Finance portal:** mark paid, **Refund** (issues an adjustment note), **Settle** bonds, **Import bank CSV** to reconcile payments.
+- **Settings:** edit kitchen packages, set up two-factor.
+- **Customers:** searchable directory of real accounts.
 
 ## Project layout
 

@@ -1,6 +1,8 @@
 const env = require('../config/env');
 const OutboxJob = require('../models/OutboxJob');
 const logger = require('../utils/logger');
+const { render } = require('./emailTemplates');
+const { sendSmtp } = require('./mailer');
 
 const MAX_ATTEMPTS = 10;
 const REQUEST_TIMEOUT_MS = 8000;
@@ -8,18 +10,35 @@ const REQUEST_TIMEOUT_MS = 8000;
 let timer = null;
 let running = false;
 
-/** Queue a Sheets/email sync job. Pass the transaction session to commit it atomically. */
+/**
+ * Queue background work in the caller's transaction (pass its session).
+ *  - payload.row   -> a Google Sheets row upsert (needs the webhook)
+ *  - payload.email -> a separate 'send_email' job, rendered now, sent by SMTP
+ *                     if configured, otherwise through the Apps Script webhook
+ */
 const enqueue = async (type, payload, session) => {
-  if (!env.GOOGLE_SHEET_WEBHOOK_URL) return null;
-  const [job] = await OutboxJob.create([{ type, payload }], { session });
-  return job;
+  const jobs = [];
+  const { email, ...rest } = payload || {};
+  if (env.GOOGLE_SHEET_WEBHOOK_URL && type !== 'send_email' && rest.row) jobs.push({ type, payload: rest });
+
+  const mail = type === 'send_email' ? payload : email;
+  if (mail && mail.to) {
+    const rendered = render(mail.template, mail.data);
+    if (env.hasEmailChannel) {
+      jobs.push({ type: 'send_email', payload: { to: mail.to, template: mail.template, ...rendered } });
+    } else if (!env.isProd && !env.isTest) {
+      logger.info(`[email:dev] to=${mail.to} subject="${rendered.subject}"${mail.data?.link ? ` link=${mail.data.link}` : ''}`);
+    }
+  }
+  if (!jobs.length) return null;
+  return OutboxJob.create(jobs, { session, ordered: true });
 };
 
-const deliver = async (job) => {
+const postWebhook = async (message) => {
   const res = await fetch(env.GOOGLE_SHEET_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ secret: env.GOOGLE_SHEET_WEBHOOK_SECRET, action: job.type, job_id: job._id.toString(), ...job.payload }),
+    body: JSON.stringify({ secret: env.GOOGLE_SHEET_WEBHOOK_SECRET, ...message }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     redirect: 'follow',
   });
@@ -34,6 +53,16 @@ const deliver = async (job) => {
   if (!res.ok || !body || body.status !== 'success') {
     throw new Error(`Webhook rejected job: HTTP ${res.status} ${body?.message || text.slice(0, 120)}`);
   }
+};
+
+const deliver = async (job) => {
+  const id = job._id.toString();
+  if (job.type === 'send_email') {
+    const { to, subject, html, text } = job.payload;
+    if (env.SMTP_URL) return sendSmtp({ to, subject, html, text });
+    return postWebhook({ action: 'send_email', job_id: id, email: { to, subject, html } });
+  }
+  return postWebhook({ action: job.type, job_id: id, ...job.payload });
 };
 
 /** Claim and process due jobs one at a time. Safe to run on several instances. */
@@ -71,7 +100,7 @@ const processDueJobs = async (limit = 20) => {
 };
 
 const start = () => {
-  if (timer || !env.GOOGLE_SHEET_WEBHOOK_URL) return;
+  if (timer || !(env.GOOGLE_SHEET_WEBHOOK_URL || env.SMTP_URL)) return;
   timer = setInterval(async () => {
     if (running) return;
     running = true;

@@ -32,6 +32,8 @@ const createApp = () => {
       maxAge: 600,
     })
   );
+  // Bank statement CSVs can be larger than normal requests.
+  app.use('/api/invoices/reconcile', express.json({ limit: '3mb' }));
   app.use(express.json({ limit: '100kb' }));
 
   if (!env.isTest) {

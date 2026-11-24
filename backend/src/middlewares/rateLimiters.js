@@ -1,12 +1,16 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const env = require('../config/env');
+const MongoRateLimitStore = require('./mongoRateLimitStore');
 
 /**
- * In-memory limits suit a single server instance. When running more than one
- * instance, switch these to a shared store (e.g. rate-limit-redis).
+ * Production uses a MongoDB-backed store so limits hold across several API
+ * instances (RATE_LIMIT_STORE=mongo, the default when NODE_ENV=production).
+ * If the store is unreachable, requests are allowed rather than blocked.
  */
+let n = 0;
 const make = (windowMs, limit, message, keyGenerator) =>
   rateLimit({
+    ...(env.rateLimitStore === 'mongo' ? { store: new MongoRateLimitStore(`rl${(n += 1)}`), passOnStoreError: true } : {}),
     windowMs,
     limit: env.isTest ? 10000 : limit,
     standardHeaders: 'draft-8',

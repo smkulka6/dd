@@ -48,6 +48,7 @@ const bookingSchema = new mongoose.Schema(
     admin_notes: { type: String, default: '', maxlength: 2000 },
     invoice: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice' },
 
+    series_id: { type: String, index: true, sparse: true }, // recurring bookings share one id
     terms_version: { type: String },
     terms_accepted_at: { type: Date },
   },
@@ -93,6 +94,7 @@ bookingSchema.methods.toPublicShape = function toPublicShape({ includeAccessCode
     payment_method: this.payment_method,
     paid_at: this.paid_at?.toISOString(),
     hold_expires_at: this.hold_expires_at?.toISOString(),
+    series_id: this.series_id,
     created_at: this.createdAt?.toISOString(),
   };
   if (admin) {

@@ -1,20 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Package, 
-  Calendar, 
-  Clock, 
-  ShieldCheck, 
-  CheckCircle, 
-  AlertCircle, 
-  CreditCard, 
-  ArrowRight, 
-  Loader2, 
-  Building, 
-  User, 
-  Mail, 
-  ThermometerSnowflake, 
-  Sparkles,
-  Info
+import {
+  Package,
+  Calendar,
+  Clock,
+  CheckCircle,
+  AlertCircle,
+  ArrowRight,
+  Loader2,
+  User,
+  Mail,
+  ThermometerSnowflake
 } from 'lucide-react';
 import { api, perthToday, addDaysToDate } from '../services/api';
 import { StorageType, StorageDurationType, StorageBooking, StorageAvailability } from '../types';

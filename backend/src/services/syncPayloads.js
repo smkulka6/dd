@@ -2,7 +2,6 @@
  * Shapes of the rows and emails sent to the Google Apps Script webhook.
  * The sheet is a downstream report; MongoDB is the source of truth.
  */
-const env = require('../config/env');
 const { toDollars } = require('../utils/money');
 
 const bookingRow = (b) => ({
@@ -58,17 +57,7 @@ const enquiryRow = (e) => ({
   status: e.status,
 });
 
-/** Email instruction for the Apps Script. Payment details always come from server config. */
-const email = (to, template, data) => ({
-  to,
-  template,
-  data: {
-    ...data,
-    seller_name: env.SELLER_TRADING_NAME,
-    seller_phone: env.SELLER_PHONE,
-    seller_email: env.SELLER_EMAIL,
-    payment: env.paymentDetails,
-  },
-});
+/** Email instruction: rendered by emailTemplates when queued. */
+const email = (to, template, data) => ({ to, template, data });
 
 module.exports = { bookingRow, storageRow, enquiryRow, email };

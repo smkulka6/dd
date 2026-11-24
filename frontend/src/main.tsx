@@ -3,6 +3,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App';
+import { AccountLinks } from './components/account/AccountLinks';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -82,6 +83,8 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <App />
+      {/* Password-reset and email-confirmation links from emails */}
+      <AccountLinks onSignedIn={(u) => window.dispatchEvent(new CustomEvent('dd:user-updated', { detail: u }))} />
     </ErrorBoundary>
   </StrictMode>,
 );

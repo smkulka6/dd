@@ -1,51 +1,37 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { 
-  Shield, 
+import {
+  Shield,
   ShieldCheck,
-  Calendar, 
-  Clock, 
-  DollarSign, 
-  CheckCircle, 
-  XCircle, 
-  AlertCircle, 
-  Users, 
-  Search, 
-  Filter, 
-  LogOut, 
-  Settings, 
-  Lock, 
-  Plus, 
-  Trash2, 
-  Check, 
-  Loader2, 
-  ChevronRight, 
+  Calendar,
+  Clock,
+  DollarSign,
+  CheckCircle,
+  AlertCircle,
+  Users,
+  Search,
+  LogOut,
+  Settings,
+  Lock,
+  Plus,
+  Trash2,
+  Check,
+  Loader2,
+  ChevronRight,
   ArrowLeft,
   Mail,
-  Phone,
   FileSpreadsheet,
-  ExternalLink,
-  RefreshCw,
   Bell,
   ChefHat,
   LayoutDashboard,
   CalendarDays,
   CreditCard,
-  Building,
   BarChart3,
-  HelpCircle,
   TrendingUp,
-  Download,
-  AlertTriangle,
-  Send,
-  Eye,
   Sliders,
-  Sparkles,
   ChevronLeft,
   Package,
   PanelLeftClose,
-  PanelLeftOpen,
-  Minimize2,
-  Maximize2
+  PanelLeftOpen
 } from 'lucide-react';
 import { 
   Booking, 
@@ -55,16 +41,17 @@ import {
   Enquiry,
   StorageBooking 
 } from '../types';
-import { 
-  api, 
+import {
+  api,
   formatDisplayDate,
   formatDisplayTime,
   calculateEndTime,
-  normalizeDate,
-  normalizeTime,
   perthToday,
   addDaysToDate
 } from '../services/api';
+import { TwoFactorSetup } from './account/TwoFactorSetup';
+import { CustomerDirectory } from './admin/CustomerDirectory';
+import { PackagesEditor } from './admin/PackagesEditor';
 
 interface AdminDashboardProps {
   onBackToSite: () => void;
@@ -92,6 +79,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, []);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [otp, setOtp] = useState('');
+  const [doorCode, setDoorCode] = useState('');
+  const [paymentRef, setPaymentRef] = useState('');
+  const [otpRequired, setOtpRequired] = useState(false);
+  const [needs2fa, setNeeds2fa] = useState(false);
+  const [show2faSetup, setShow2faSetup] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
 
@@ -267,49 +260,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [sendPaymentLinkChoice, setSendPaymentLinkChoice] = useState<'yes' | 'no'>('yes');
   const [paymentOptionChoice, setPaymentOptionChoice] = useState<'full' | 'split'>('full');
 
-  // Group bookings & customer records into unique customer profiles (Image 3)
-  const uniqueCustomers = useMemo(() => {
-    const map = new Map<string, {
-      id: string;
-      full_name: string;
-      business_name?: string;
-      email: string;
-      phone: string;
-      abn: string;
-      status: 'Active' | 'Inactive';
-      totalBookings: number;
-    }>();
-
-    bookings.forEach((b) => {
-      const key = (b.email || b.phone || b.full_name).trim().toLowerCase();
-      if (!key) return;
-
-      const isActive = b.status === 'confirmed' || b.status === 'approved' || b.status === 'pending_approval';
-      const existing = map.get(key);
-      const abnVal = b.abn || '';
-
-      if (existing) {
-        existing.totalBookings += 1;
-        if (isActive) existing.status = 'Active';
-        if (!existing.business_name && b.business_name) existing.business_name = b.business_name;
-        if (abnVal && !existing.abn) existing.abn = abnVal;
-      } else {
-        map.set(key, {
-          id: key,
-          full_name: b.full_name,
-          business_name: b.business_name || '',
-          email: b.email,
-          phone: b.phone,
-          abn: abnVal,
-          status: isActive ? 'Active' : 'Inactive',
-          totalBookings: 1,
-        });
-      }
-    });
-
-    return Array.from(map.values());
-  }, [bookings]);
-
   // Kitchen Calendar: Weekly calendar view state & helpers (Image 4 wireframe)
   // Monday of the current week in Perth (was hard-coded to 26 Oct 2026).
   const currentPerthMonday = () => {
@@ -403,6 +353,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setEnquiries(enq);
       setStorageBookings(await api.getStorageBookings());
     } catch (err: any) {
+      if (err.details?.two_factor_setup_required) {
+        setNeeds2fa(true);
+        return;
+      }
       setLoadError(err.message || 'Could not load dashboard data from the server.');
     }
   };
@@ -412,10 +366,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setLoginError(null);
     setLoggingIn(true);
     try {
-      const res = await api.adminLogin(username.trim(), password);
+      const res = await api.adminLogin(username.trim(), password, otp);
       setPassword('');
+      setOtp('');
+      setOtpRequired(false);
+      setNeeds2fa(Boolean(res.two_factor_setup_required));
       setToken(res.access_token);
     } catch (err: any) {
+      if (err.details?.otp_required) setOtpRequired(true);
       setLoginError(err.message || 'Invalid username or password');
     } finally {
       setLoggingIn(false);
@@ -465,7 +423,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         payment_status: newPayment && newPayment !== selectedBooking?.payment_status ? newPayment : undefined,
         admin_notes: (overrideNotes !== undefined ? overrideNotes : actionNotes.trim()) || undefined,
         reference_code: refCode,
+        access_code: doorCode.trim() || undefined,
+        payment_reference: newPayment === 'paid' ? paymentRef.trim() || undefined : undefined,
       });
+      setDoorCode('');
+      setPaymentRef('');
       setBookings((prev) =>
         prev.map((b) =>
           b.id === updated.id || (refCode && b.reference_code === refCode)
@@ -615,6 +577,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // If not logged in
+  if (token && needs2fa) {
+    return (
+      <div className="min-h-screen bg-[#F4F6F8] flex items-center justify-center p-4">
+        <TwoFactorSetup
+          scope="admin"
+          onDone={() => {
+            setNeeds2fa(false);
+            setToken(api.getAdminToken());
+          }}
+          onCancel={handleLogout}
+        />
+      </div>
+    );
+  }
+
   if (!token) {
     return (
       <div className="min-h-screen bg-[#F4F6F8] flex items-center justify-center p-4">
@@ -660,6 +637,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               />
             </div>
 
+            {otpRequired && (
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">Authenticator code</label>
+                <input
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                  placeholder="6-digit code"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm font-mono tracking-widest text-center"
+                  autoFocus
+                  required
+                />
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loggingIn}
@@ -683,7 +677,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }
 
   // Filter calculations
-  const pendingApprovals = bookings.filter((b) => b.status === 'pending');
   const actionRequiredList = bookings.filter((b) => b.status === 'pending' || (b.status === 'approved' && b.payment_status === 'unpaid'));
   const totalRevenueCollected = bookings
     .filter((b) => b.payment_status === 'paid')
@@ -696,12 +689,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     .reduce((acc, b) => acc + (b.security_deposit || 0), 0);
 
   // Booking status counts for donut chart
-  const confirmedCount = bookings.filter((b) => b.status === 'confirmed').length;
-  const approvedCount = bookings.filter((b) => b.status === 'approved').length;
-  const pendingCount = bookings.filter((b) => b.status === 'pending').length;
-  const rejectedCount = bookings.filter((b) => b.status === 'rejected').length;
-  const completedCount = bookings.filter((b) => b.status === 'completed').length;
-  const totalBookingsCount = bookings.length;
 
   return (
     <div className="h-screen bg-[#F4F6F8] flex text-[#1C252E] font-sans overflow-hidden">
@@ -2176,53 +2163,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
            ======================================================== */}
         {activeNav === 'customers' && (
           <main className="p-4 sm:p-6 lg:p-8 space-y-6 flex-1 max-w-[1440px] overflow-y-auto">
-            <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-4">
-              <div className="flex items-center justify-between border-b border-gray-100 pb-4">
-                <div>
-                  <h3 className="font-bold text-base text-gray-900">Tenant & Applicant Directory</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">Verified food businesses and registered commercial kitchen hirers</p>
-                </div>
-                <span className="text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-full">
-                  {uniqueCustomers.length} Hirer Accounts
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {uniqueCustomers.map((c) => (
-                  <div key={c.id} className="p-4 rounded-xl border border-gray-200/90 bg-white hover:border-emerald-600 shadow-2xs transition-all space-y-2.5 text-xs">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="font-bold text-sm text-gray-900">{c.full_name}</div>
-                        <div className="text-gray-500 font-medium">{c.business_name || 'Commercial Kitchen Hirer'}</div>
-                      </div>
-                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
-                        c.status === 'Active'
-                          ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                          : 'bg-gray-100 text-gray-600 border-gray-200'
-                      }`}>
-                        ● {c.status}
-                      </span>
-                    </div>
-
-                    <div className="space-y-1 text-gray-600">
-                      <div className="flex items-center gap-1.5">
-                        <Mail className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                        <span className="truncate">{c.email}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Phone className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                        <span>{c.phone}</span>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-gray-100 pt-2 flex items-center justify-between text-[11px]">
-                      <span className="font-semibold text-gray-700">ABN: <span className="font-mono text-gray-900">{c.abn}</span></span>
-                      <span className="text-gray-400 font-medium">{c.totalBookings} booking{c.totalBookings > 1 ? 's' : ''}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <CustomerDirectory bookings={bookings} />
           </main>
         )}
 
@@ -2489,6 +2430,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             >
                               {st.status === 'confirmed' ? 'Mark Completed' : ['pending', 'approved'].includes(st.status) ? 'Record Payment' : st.status}
                             </button>
+                            {['pending', 'approved', 'confirmed'].includes(st.status) && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const target = st.status === 'confirmed' ? 'cancelled' : 'rejected';
+                                  if (!window.confirm(`${target === 'cancelled' ? 'Cancel' : 'Reject'} storage booking ${st.reference_code}? The bay is released.`)) return;
+                                  try {
+                                    await api.updateStorageBookingStatus(st.reference_code, { status: target });
+                                    setStorageBookings(await api.getStorageBookings());
+                                  } catch (err: any) {
+                                    showToast(err.message || 'Could not update storage booking', 'error');
+                                  }
+                                }}
+                                className="ml-1.5 text-xs px-2.5 py-1 rounded-lg bg-red-50 text-red-700 hover:bg-red-100 font-bold cursor-pointer"
+                              >
+                                {st.status === 'confirmed' ? 'Cancel' : 'Reject'}
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))
@@ -2578,6 +2537,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 its shared secret are set on the server (<code className="font-mono">GOOGLE_SHEET_WEBHOOK_URL</code>,{' '}
                 <code className="font-mono">GOOGLE_SHEET_WEBHOOK_SECRET</code>) — never in the browser.
               </p>
+            </div>
+
+            <PackagesEditor
+              config={config}
+              onSaved={(c) => {
+                setConfig(c);
+                onConfigUpdated(c);
+              }}
+            />
+
+            <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-xs space-y-2 text-xs">
+              <h3 className="font-bold text-sm text-gray-900">Two-factor sign-in</h3>
+              <p className="text-gray-500">Protect this staff account with an authenticator app code at every sign-in.</p>
+              <button
+                type="button"
+                onClick={() => setShow2faSetup(true)}
+                className="px-4 py-2 rounded-xl bg-[#112F21] text-white font-bold cursor-pointer"
+              >
+                Set up two-factor
+              </button>
+              {show2faSetup && (
+                <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+                  <TwoFactorSetup
+                    scope="admin"
+                    onDone={() => {
+                      setShow2faSetup(false);
+                      setToken(api.getAdminToken());
+                      showToast('Two-factor sign-in is on for this account.', 'success');
+                    }}
+                    onCancel={() => setShow2faSetup(false)}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Pricing Settings */}
@@ -2712,6 +2704,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </span>
                 </div>
               </div>
+            </div>
+
+            {/* Payment reference and door code used by the actions below */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <label className="space-y-1">
+                <span className="font-bold text-gray-700">Bank / PayID reference</span>
+                <input
+                  value={paymentRef}
+                  onChange={(e) => setPaymentRef(e.target.value)}
+                  placeholder="for Mark paid"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200"
+                  maxLength={120}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-bold text-gray-700">Door code (optional)</span>
+                <input
+                  value={doorCode}
+                  onChange={(e) => setDoorCode(e.target.value.replace(/[^0-9#]/g, ''))}
+                  placeholder={selectedBooking.access_code ? `current ${selectedBooking.access_code}` : 'auto-generated if blank'}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 font-mono"
+                  maxLength={9}
+                />
+              </label>
             </div>
 
             {/* Quick Actions */}

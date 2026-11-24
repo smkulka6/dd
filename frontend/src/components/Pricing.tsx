@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, DollarSign, Sparkles, ArrowRight, ShieldCheck, Clock } from 'lucide-react';
+import { Check, ArrowRight } from 'lucide-react';
 import { KitchenConfig } from '../types';
 
 interface PricingProps {

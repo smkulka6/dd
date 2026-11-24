@@ -185,6 +185,9 @@ export interface Enquiry {
 }
 
 export interface DashboardStats {
+  gst_collected?: number;
+  bonds_held?: number;
+  outstanding_amount?: number;
   total_bookings: number;
   pending_requests?: number;
   approved_count?: number;
@@ -203,6 +206,8 @@ export interface DashboardStats {
 
 export interface User {
   id: number | string;
+  email_verified?: boolean;
+  two_factor_enabled?: boolean;
   role?: 'hirer' | 'staff_admin' | 'super_admin';
   terms_version?: string;
   email: string;
@@ -223,6 +228,36 @@ export interface UserAuthResponse {
   access_token: string;
   token_type: string;
   user: User;
+  two_factor_setup_required?: boolean;
+}
+
+export interface AdjustmentNote {
+  document_title: string;
+  note_number: string;
+  invoice_number: string;
+  booking_reference?: string;
+  issue_date: string;
+  reason: string;
+  amount: number;
+  gst: number;
+  amount_ex_gst: number;
+  method?: string;
+  reference?: string;
+}
+
+export interface BankReconcileResult {
+  applied: boolean;
+  summary: { credits: number; matched: number; recorded: number; already_paid: number; amount_mismatch: number; unmatched: number };
+  results: {
+    line: number;
+    date: string | null;
+    amount: number;
+    description: string;
+    status: string;
+    reference: string | null;
+    invoice_number: string | null;
+    expected: number | null;
+  }[];
 }
 
 export type StorageType = 'dry_storage' | 'cool_room' | 'freezer';
@@ -283,6 +318,15 @@ export interface InvoiceLineItem {
 }
 
 export interface Invoice {
+  refunded_amount?: number;
+  refunded_gst?: number;
+  adjustments?: AdjustmentNote[];
+  bond_status?: 'held' | 'refunded' | 'partly_forfeited' | 'forfeited';
+  bond_refunded?: number;
+  bond_forfeited?: number;
+  bond_forfeit_gst?: number;
+  bond_settled_at?: string;
+  bond_reason?: string;
   document_title?: string;
   seller?: { legal_name?: string; trading_name?: string; abn?: string; address?: string; email?: string; phone?: string };
   amount_payable?: number;

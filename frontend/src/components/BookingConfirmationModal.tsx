@@ -1,17 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { 
-  CheckCircle, 
-  Calendar, 
-  Clock, 
-  Download, 
-  X, 
-  AlertCircle, 
+import {
+  CheckCircle,
+  Calendar,
+  X,
+  AlertCircle,
   Mail,
   Copy,
   Check,
   CreditCard,
-  Building,
-  ShieldCheck,
   ArrowRight
 } from 'lucide-react';
 import { Booking, PaymentDetails } from '../types';

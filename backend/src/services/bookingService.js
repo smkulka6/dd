@@ -143,6 +143,27 @@ const expireHolds = async (now = new Date()) => {
   return expired;
 };
 
+/**
+ * Recurring series: one normal booking per occurrence (each priced, held and
+ * paid separately). Dates that clash are skipped and reported, not forced.
+ */
+const createRecurringSeries = async (user, input, meta = {}) => {
+  const step = input.frequency === 'fortnightly' ? 14 : 7;
+  const seriesId = `SER-${require('crypto').randomBytes(5).toString('hex').toUpperCase()}`;
+  const created = [];
+  const skipped = [];
+  for (let i = 0; i < input.occurrences; i++) {
+    const date = addDays(input.booking_date, i * step);
+    try {
+      created.push(await createKitchenBooking(user, { ...input, booking_date: date }, { ...meta, seriesId }));
+    } catch (err) {
+      if (!err.expose) throw err;
+      skipped.push({ booking_date: date, reason: err.message });
+    }
+  }
+  return { series_id: seriesId, created, skipped };
+};
+
 const createKitchenBooking = async (user, input, meta = {}) => {
   const config = await KitchenConfig.get();
   const quote = quoteKitchen(config, input.duration_hours);
@@ -186,6 +207,7 @@ const createKitchenBooking = async (user, input, meta = {}) => {
         hold_expires_at: holdUntil(interval.start_at, now),
         terms_version: env.TERMS_VERSION,
         terms_accepted_at: now,
+        series_id: meta.seriesId,
       });
       await booking.save({ session });
       await BookingSlot.insertMany(
@@ -539,6 +561,7 @@ module.exports = {
   enumerateSlots,
   buildInterval,
   createKitchenBooking,
+  createRecurringSeries,
   checkSlot,
   dayAvailability,
   monthAvailability,

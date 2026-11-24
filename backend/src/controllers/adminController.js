@@ -4,6 +4,7 @@ const KitchenConfig = require('../models/KitchenConfig');
 const Enquiry = require('../models/Enquiry');
 const StorageBooking = require('../models/StorageBooking');
 const Invoice = require('../models/Invoice');
+const User = require('../models/User');
 const bookingService = require('../services/bookingService');
 const { toDollars } = require('../utils/money');
 const { perthToday, startOfPerthDay, endOfPerthDay } = require('../utils/perthTime');
@@ -14,7 +15,20 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   const today = perthToday();
   const [byStatus, revenue, hours, todayCount, enquiries, newEnquiries, storageActive, outstanding] = await Promise.all([
     Booking.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
-    Invoice.aggregate([{ $match: { status: 'paid' } }, { $group: { _id: null, inc: { $sum: '$total_inc_gst_cents' }, gst: { $sum: '$gst_cents' } } }]),
+    Invoice.aggregate([
+      { $match: { status: 'paid' } },
+      {
+        $group: {
+          _id: null,
+          // Net of refunds (adjustment notes), plus retained bonds, which become taxable when forfeited.
+          inc: { $sum: { $add: [{ $subtract: ['$total_inc_gst_cents', { $ifNull: ['$refunded_cents', 0] }] }, { $ifNull: ['$bond.forfeited_cents', 0] }] } },
+          gst: { $sum: { $add: [{ $subtract: ['$gst_cents', { $ifNull: ['$refunded_gst_cents', 0] }] }, { $ifNull: ['$bond.forfeit_gst_cents', 0] }] } },
+          bonds_held: {
+            $sum: { $cond: [{ $eq: [{ $ifNull: ['$bond.status', 'held'] }, 'held'] }, '$security_deposit_cents', 0] },
+          },
+        },
+      },
+    ]),
     Booking.aggregate([
       { $match: { status: { $in: ['pending', 'approved', 'confirmed', 'completed'] } } },
       { $group: { _id: null, h: { $sum: '$duration_hours' }, pipeline: { $sum: '$total_cents' } } },
@@ -46,6 +60,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     total_revenue: paid,
     total_revenue_aud: paid,
     gst_collected: toDollars(revenue[0]?.gst || 0),
+    bonds_held: toDollars(revenue[0]?.bonds_held || 0),
     pipeline_revenue: toDollars(hours[0]?.pipeline || 0),
     total_hours_booked: hours[0]?.h || 0,
     outstanding_amount: toDollars(outstanding[0]?.c || 0),
@@ -116,6 +131,18 @@ const updateConfig = asyncHandler(async (req, res) => {
   res.json(config.toObject({ versionKey: false }));
 });
 
+/** Customer accounts with compliance-document status, for the staff directory. */
+const getUsers = asyncHandler(async (req, res) => {
+  const filter = { role: 'hirer' };
+  const q = String(req.query.search || '').trim().slice(0, 100);
+  if (q) {
+    const rx = new RegExp(escapeRegExp(q), 'i');
+    filter.$or = [{ full_name: rx }, { email: rx }, { business_name: rx }];
+  }
+  const users = await User.find(filter).sort({ createdAt: -1 }).limit(500);
+  res.json(users.map((u) => u.toSafeJSON()));
+});
+
 const getEnquiries = asyncHandler(async (req, res) => {
   const list = await Enquiry.find().sort({ createdAt: -1 }).limit(500);
   res.json(list.map((e) => e.toPublicShape()));
@@ -138,4 +165,5 @@ module.exports = {
   updateConfig,
   getEnquiries,
   updateEnquiryStatus,
+  getUsers,
 };

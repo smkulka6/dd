@@ -26,6 +26,17 @@ const userSchema = new mongoose.Schema(
     terms_accepted_at: { type: Date },
     terms_version: { type: String },
     terms_accepted_ip: { type: String },
+    // Email verification and password reset: only SHA-256 hashes of the tokens are stored.
+    email_verified_at: { type: Date },
+    verify_token_hash: { type: String, select: false },
+    verify_token_expires: { type: Date, select: false },
+    reset_token_hash: { type: String, select: false },
+    reset_token_expires: { type: Date, select: false },
+    // Two-factor authentication (TOTP). Secrets are encrypted at rest.
+    totp_enabled: { type: Boolean, default: false },
+    totp_secret: { type: String, select: false },
+    totp_pending_secret: { type: String, select: false },
+    totp_last_step: { type: Number, default: -1, select: false },
     documents: {
       food_safety_cert: { type: documentSchema, default: undefined },
       liability_insurance: { type: documentSchema, default: undefined },
@@ -39,6 +50,9 @@ userSchema.pre('save', async function hashPassword(next) {
   this.password = await bcrypt.hash(this.password, 12);
   return next();
 });
+
+userSchema.index({ reset_token_hash: 1 }, { sparse: true });
+userSchema.index({ verify_token_hash: 1 }, { sparse: true });
 
 userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcrypt.compare(String(candidate || ''), this.password);
@@ -54,6 +68,8 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     abn: this.abn,
     phone: this.phone,
     role: this.role,
+    email_verified: Boolean(this.email_verified_at),
+    two_factor_enabled: Boolean(this.totp_enabled),
     terms_accepted: Boolean(this.terms_accepted_at),
     terms_accepted_at: this.terms_accepted_at ? this.terms_accepted_at.toISOString() : undefined,
     terms_version: this.terms_version,

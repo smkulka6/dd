@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
-import { 
-  Send, 
-  CheckCircle, 
-  AlertCircle, 
+import {
+  CheckCircle,
+  AlertCircle,
   Loader2,
-  ArrowRight, 
+  ArrowRight,
   ClipboardList,
-  Sparkles,
-  Phone
+  Sparkles
 } from 'lucide-react';
 import { KitchenConfig, EnquiryInput } from '../types';
 import { api } from '../services/api';

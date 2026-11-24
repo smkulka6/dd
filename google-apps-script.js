@@ -5,7 +5,8 @@
  * DAILY DROP — Google Sheets reporting + customer email webhook (v2)
  *
  * The Node API is the source of truth. It sends each change here from a
- * background queue, with retries. This script:
+ * background queue, with retries. (If SMTP_URL is set on the server, emails go
+ * out over SMTP instead and this script only maintains the sheet.) This script:
  *   - rejects any request without the shared secret,
  *   - upserts rows by reference code (retries never create duplicate rows),
  *   - sends customer emails with every value HTML-escaped,
@@ -173,6 +174,16 @@ function doPost(e) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return json({ status: 'error', message: 'busy, retry' });
   try {
+    // Emails rendered (and HTML-escaped) by the server; this script only delivers them.
+    if (data.action === 'send_email') {
+      var cache0 = CacheService.getScriptCache();
+      if (data.email && data.email.to && !(data.job_id && cache0.get('sent:' + data.job_id))) {
+        MailApp.sendEmail({ to: String(data.email.to), subject: String(data.email.subject), htmlBody: String(data.email.html) });
+        if (data.job_id) cache0.put('sent:' + data.job_id, '1', 21600);
+      }
+      return json({ status: 'success' });
+    }
+
     var target = { upsert_booking: 'Bookings', upsert_storage: 'Storage', upsert_enquiry: 'Enquiries' }[data.action];
     if (!target) return json({ status: 'error', message: 'unknown action' });
     if (data.row && data.row.reference_code) upsert(target, data.row);
